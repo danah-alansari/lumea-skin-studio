@@ -1,0 +1,9 @@
+# build output — regenerate with `python3 build.py`
+dist/
+
+# local tooling
+.claude/
+.vercel/
+
+# macOS
+.DS_Store
