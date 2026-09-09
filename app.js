@@ -128,6 +128,8 @@ function blankState(u) {
     messages: [],
     progress: [],
     reviews: {},
+    clinicianReview: null,
+    serviceReview: null,
     settings: { emailUpdates: true, shipReminders: true, dermAlerts: true, shareAnon: false },
     history: []
   };
@@ -551,6 +553,20 @@ const Ratings = {
     });
   },
   community(id) { const h = hash(id); return { avg: (4.1 + (h % 8) / 10).toFixed(1), count: 40 + (h % 380) }; },
+
+  /* the other two things a member can rate: their dermatologist, and Lumea itself */
+  getFor(kind) { const st = Store.state(); if (!st) return null; return kind === 'clinician' ? st.clinicianReview : st.serviceReview; },
+  setFor(kind, rating, text, recommend) {
+    Store.commit(st => {
+      const key = kind === 'clinician' ? 'clinicianReview' : 'serviceReview';
+      const prev = st[key] || {};
+      st[key] = { rating: rating || prev.rating || 0, text: text != null ? text : (prev.text || ''),
+                  recommend: recommend != null ? recommend : prev.recommend, at: now() };
+      st.history.push({ at: now(), t: (kind === 'clinician' ? 'Rated ' + DERM.name : 'Rated the Lumea experience') + ' ' + st[key].rating + '/5' });
+    });
+  },
+  clinicianCommunity() { return { avg: '4.9', count: 212 }; },
+  serviceCommunity() { return { avg: '4.7', count: 1840 }; },
   /* floor, not round — a 4.6 average should not read as five filled stars */
   stars(n) { const f = Math.floor(n); let out = ''; for (let i = 1; i <= 5; i++) out += i <= f ? '★' : '☆'; return out; }
 };
@@ -583,6 +599,7 @@ const Review = {
         version: prev ? prev.version + 1 : 1
       });
       st.messages.push({ id: uid('m'), who: 'derm', text: st.review.notes, at: now() });
+      st.messages.push({ id: uid('m'), who: 'system', text: 'Your dermatologist’s report is ready — it lists your prescribed routine and when to use each step. Open it from your dashboard or your analysis.', at: now() });
       if (st.review.adjustments.length) {
         st.messages.push({ id: uid('m'), who: 'system', text: st.review.adjustments.length + ' recommendation(s) adjusted by ' + DERM.name + ' before release.', at: now() });
       }
@@ -1713,9 +1730,21 @@ Views.report = () => {
         <span class="dermface">${esc(initials(DERM.name))}</span>
         <div><strong style="font-weight:500">${ico.check} Dermatologist reviewed</strong>
           <div class="small">Your skin analysis was reviewed by ${esc(DERM.name)} on ${fmtDate(rv.confirmedAt)}.</div></div>
-        <a class="btn btn--sm btn--gold" href="#/routine" style="margin-left:auto">View my routine</a>
+        <a class="btn btn--sm btn--gold" href="#/plan" style="margin-left:auto">Open my report</a>
       </div>
-      ${rv.notes ? `<div class="card reveal" style="margin-top:14px"><span class="card__label">Dermatologist’s note</span><p class="small" style="margin:0">${esc(rv.notes)}</p></div>` : ''}`;
+      <div class="card reveal" style="margin-top:14px">
+        <div class="rowbetween" style="gap:14px">
+          <div style="flex:1;min-width:220px">
+            <span class="card__label" style="margin-bottom:8px">Your dermatologist’s report</span>
+            ${rv.notes ? `<p class="small" style="margin:0 0 10px">“${esc(rv.notes.slice(0, 150))}${rv.notes.length > 150 ? '…' : ''}”</p>` : ''}
+            <div class="tiny">${esc(DERM.name)} · issued ${fmtDate(rv.confirmedAt)} · ${st.routine ? Engine.routineProducts(st.routine).length + ' products prescribed' : ''}</div>
+          </div>
+          <div class="btnrow">
+            <a class="btn btn--sm" href="#/plan">Read the full report ${ico.arrow}</a>
+            <a class="btn btn--ghost btn--sm" href="#/routine">My skin line</a>
+          </div>
+        </div>
+      </div>`;
     return `
       <div class="reviewbar reviewbar--pending reveal">
         <span class="dermface">${esc(initials(DERM.name))}</span>
@@ -1947,6 +1976,220 @@ function reviewModal(id) {
   });
 }
 
+/* ===================== FEEDBACK: DOCTOR + SERVICE ===================== */
+function starPicker(key, current) {
+  return `<div class="ratepick" data-star="${key}" role="group" aria-label="Rating out of five">
+    ${[1, 2, 3, 4, 5].map(n => `<button type="button" data-v="${n}" class="${current >= n ? 'is-on' : ''}" aria-label="${n} out of 5">★</button>`).join('')}
+  </div>`;
+}
+
+function feedbackModal(kind) {
+  const isDerm = kind === 'clinician';
+  const mine = Ratings.getFor(kind) || { rating: 0, text: '', recommend: null };
+  const com = isDerm ? Ratings.clinicianCommunity() : Ratings.serviceCommunity();
+  UI.modal(`<h3>${isDerm ? 'Rate ' + esc(DERM.name) : 'Rate your Lumea experience'}</h3>
+    <p class="small">${isDerm
+      ? 'How was the review and the guidance you were given? Members average <strong style="font-weight:500">' + com.avg + '</strong> out of 5 for this clinician.'
+      : 'The whole thing — analysis, review, the trial, delivery. Members average <strong style="font-weight:500">' + com.avg + '</strong> out of 5.'}</p>
+    <div class="field" style="margin-top:18px"><label>Your rating</label>${starPicker(kind, mine.rating)}</div>
+    <div class="field"><label for="fbText">${isDerm ? 'Your review of the clinician' : 'Your review'}</label>
+      <textarea class="textarea" id="fbText" placeholder="${isDerm
+        ? 'Did the explanation make sense? Did the routine suit your skin?'
+        : 'What worked, what didn’t, what would you change?'}">${esc(mine.text || '')}</textarea></div>
+    ${isDerm ? '' : `<label class="check" style="margin-bottom:18px"><input type="checkbox" id="fbRec" ${mine.recommend ? 'checked' : ''}>
+      <span>I would recommend Lumea to a friend</span></label>`}
+    <div class="btnrow"><button class="btn" data-ok>Save my review</button>
+      <button class="btn btn--ghost" data-close>Cancel</button></div>`, {
+    after(m) {
+      let picked = mine.rating;
+      $$('[data-star] button', m).forEach(b => b.addEventListener('click', () => {
+        picked = parseInt(b.dataset.v, 10);
+        $$('[data-star] button', m).forEach(x => x.classList.toggle('is-on', parseInt(x.dataset.v, 10) <= picked));
+      }));
+      $('[data-ok]', m).addEventListener('click', () => {
+        if (!picked) { UI.toast('Choose a star rating first.', 'warn'); return; }
+        const rec = $('#fbRec', m) ? $('#fbRec', m).checked : undefined;
+        Ratings.setFor(kind, picked, $('#fbText', m).value.trim(), rec);
+        UI.closeModal();
+        UI.toast(isDerm ? 'Thank you — your clinician review is saved' : 'Thank you — your review is saved', 'good');
+        Router.render();
+      });
+    }
+  });
+}
+
+/* the three things a member can rate, in one card */
+function feedbackCard(routine, opts) {
+  opts = opts || {};
+  const ids = routine ? Engine.routineProducts(routine).map(p => p.id) : [];
+  const rated = ids.filter(id => Ratings.get(id) && Ratings.get(id).rating).length;
+  const derm = Ratings.getFor('clinician');
+  const svc = Ratings.getFor('service');
+  const row = (title, sub, done, action, key) => `
+    <div class="reviewcard">
+      <div class="rowbetween" style="gap:12px">
+        <div style="flex:1;min-width:170px">
+          <strong style="font-weight:500">${title}</strong>
+          <div class="tiny">${sub}</div>
+          ${done ? `<div class="ratemeta" style="margin-top:6px"><span class="starline">${Ratings.stars(done.rating)}</span>
+            You rated ${done.rating}/5${done.text ? ' — “' + esc(done.text.slice(0, 90)) + (done.text.length > 90 ? '…' : '') + '”' : ''}</div>` : ''}
+        </div>
+        <button class="btn ${done ? 'btn--ghost' : ''} btn--sm" data-fb="${key}">${done ? 'Edit' : action}</button>
+      </div>
+    </div>`;
+  return `<div class="card ${opts.pad ? 'card--pad-lg' : ''} reveal" id="feedbackCard">
+    <span class="card__label">${opts.title || 'Rate and review'}</span>
+    <p class="small" style="margin-bottom:6px">${opts.blurb || 'Your feedback stays on your account and helps other members choose.'}</p>
+    ${ids.length ? row('Your products', rated + ' of ' + ids.length + ' rated · ' + ids.length + ' items in your routine', null, 'Rate products', 'products') : ''}
+    ${row('Your dermatologist', esc(DERM.name) + ' · ' + esc(DERM.title), derm, 'Rate clinician', 'clinician')}
+    ${row('Your Lumea experience', 'Analysis, review, trial and delivery', svc, 'Rate service', 'service')}
+  </div>`;
+}
+
+function bindFeedback() {
+  $$('[data-fb]').forEach(b => b.addEventListener('click', () => {
+    const kind = b.dataset.fb;
+    if (kind === 'products') {
+      const card = $('#ratingsCard');
+      if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+      Router.go('/routine');
+      return;
+    }
+    feedbackModal(kind);
+  }));
+}
+
+/* ===================== SHARED: START CHOOSER ===================== */
+function startChooser(r) {
+  const trialTotal = Engine.routineTotal(r, 'trial'), fullTotal = Engine.routineTotal(r, 'full');
+  return `<div class="card card--pad-lg reveal" style="margin-bottom:26px">
+    <span class="card__label">Choose how to start</span>
+    <div class="grid g2" style="margin:0 0 18px">
+      <label class="pickbox is-on" data-buy="trial">
+        <div class="pickbox__top">
+          <span><strong style="font-weight:500">14-day sample kit</strong><br>
+            <span class="tiny">Every step in sample size. Two weeks to judge tolerance before spending more.</span></span>
+          <input type="radio" name="startWith" value="trial" checked>
+        </div>
+        <div class="rowbetween" style="margin-top:12px"><span class="price">${money(trialTotal * .75)}</span><span class="pill pill--gold">−25% bundle</span></div>
+      </label>
+      <label class="pickbox" data-buy="full">
+        <div class="pickbox__top">
+          <span><strong style="font-weight:500">The whole routine, full size</strong><br>
+            <span class="tiny">Skip the trial and buy all ${Engine.routineProducts(r).length} products outright.</span></span>
+          <input type="radio" name="startWith" value="full">
+        </div>
+        <div class="rowbetween" style="margin-top:12px"><span class="price">${money(fullTotal)}</span><span class="tiny">${money(fullTotal * .85)}/mo if you subscribe later</span></div>
+      </label>
+    </div>
+    <button class="btn btn--lg" id="buyNow">Add to basket &amp; check out ${ico.arrow}</button>
+    <p class="tiny" style="margin-top:12px">Pay by KNET, card or cash on delivery. Either way you can review and rate everything afterwards.</p>
+  </div>`;
+}
+
+function bindStartChooser(r) {
+  let startWith = 'trial';
+  $$('[data-buy]').forEach(box => box.addEventListener('click', () => {
+    $$('[data-buy]').forEach(b => b.classList.remove('is-on'));
+    box.classList.add('is-on');
+    $('input', box).checked = true;
+    startWith = box.dataset.buy;
+  }));
+  const buy = $('#buyNow');
+  if (buy) buy.addEventListener('click', () => {
+    Cart.addRoutine(r, startWith);
+    Router.go('/checkout?kind=' + startWith);
+  });
+}
+
+/* ===================== VIEW: DERMATOLOGIST'S REPORT ===================== */
+Views.plan = () => {
+  const st = Store.state(), u = Store.user();
+  if (!st.routine || st.review.status !== 'confirmed')
+    return { html: '', after() { UI.toast('Your dermatologist’s report appears once your analysis has been reviewed.', 'warn'); Router.go('/dashboard'); } };
+
+  const r = st.report, rv = st.review, rt = st.routine;
+  const ref = 'LM-R-' + String(hash(rt.createdAt + u.id) % 900000 + 100000);
+  const inBoth = (id) => rt.am.some(x => x.id === id) && rt.pm.some(x => x.id === id);
+  const whenLabel = (id, slot) => inBoth(id) ? 'Morning &amp; evening' : (slot === 'am' ? 'Morning' : 'Evening');
+
+  const rxRows = (items, slot) => items.map((it, i) => {
+    const p = P(it.id);
+    return `<div class="rxrow">
+      <span class="rxrow__n">${i + 1}</span>
+      <div class="rxrow__art">${art(p, 'rx' + slot + i)}</div>
+      <div class="rxrow__body">
+        <div class="prod__cat">${esc(p.cat)}</div>
+        <div class="prod__name" style="font-size:1.05rem">${esc(p.name)}</div>
+        <p class="small" style="margin:4px 0 0">${esc(p.why)}</p>
+        ${p.caution ? `<p class="tiny" style="color:var(--clay);margin:6px 0 0">${ico.info} ${esc(p.caution)}</p>` : ''}
+      </div>
+      <span class="rxrow__when">${whenLabel(it.id, slot)}</span>
+    </div>`;
+  }).join('');
+
+  return {
+    html: `<div class="view--app"><div class="wrap wrap--mid">
+      <div class="pagehead viewin">
+        <span class="eyebrow eyebrow--gold">Sent to you by your dermatologist</span>
+        <h1>Your Dermatologist’s Report</h1>
+        <p class="small">Issued ${fmtDate(rv.confirmedAt)} · reference ${esc(ref)}</p>
+      </div>
+
+      <div class="doc reveal">
+        <div class="doc__head">
+          <div class="brand" style="margin-bottom:0"><span class="brand__mark">
+            <svg viewBox="0 0 32 32" width="22" height="22"><circle cx="16" cy="16" r="12.5" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+          </span><span class="brand__word">LUMEA</span></div>
+          <div class="doc__meta">
+            <div><span class="tiny">Prepared for</span><strong>${esc(u.name)}</strong></div>
+            <div><span class="tiny">Reviewed by</span><strong>${esc(DERM.name)}</strong>
+              <span class="tiny">${esc(DERM.title)} · ${esc(DERM.reg)}</span></div>
+          </div>
+        </div>
+
+        <div class="doc__body">
+          <span class="card__label">Assessment</span>
+          <p class="lede" style="font-size:1.02rem;margin-bottom:14px">${esc(rv.notes)}</p>
+          <p class="small" style="margin-bottom:18px">${esc(r.summary)}</p>
+
+          <div class="chips" style="margin-bottom:22px">
+            <span class="pill">Skin score ${r.score}/100</span>
+            <span class="pill">${esc(r.band)} profile</span>
+            ${r.focus.map(f => `<span class="tag">${esc(f.t)}</span>`).join('')}
+          </div>
+
+          <hr class="hairline" style="margin:0 0 22px">
+
+          <div class="routinehead" style="margin-bottom:14px"><span class="glyph">${ico.sun}</span>
+            <h3 style="font-size:1.25rem">Morning</h3><span class="pill" style="margin-left:auto">${rt.am.length} steps</span></div>
+          <div class="rx">${rxRows(rt.am, 'am')}</div>
+
+          <div class="routinehead" style="margin:26px 0 14px"><span class="glyph">${ico.moon}</span>
+            <h3 style="font-size:1.25rem">Evening</h3><span class="pill" style="margin-left:auto">${rt.pm.length} steps</span></div>
+          <div class="rx">${rxRows(rt.pm, 'pm')}</div>
+
+          <div class="notice notice--gold" style="margin-top:24px">${ico.info}<div><strong>Introduce one active at a time.</strong> Full application instructions sit on each product — open any step from <a class="link" href="#/routine">Your Skin Line</a>. Message me if anything stings, flakes or reddens.</div></div>
+
+          <div class="doc__sign">
+            <div>
+              <div class="tiny">Approved and released</div>
+              <strong style="font-weight:500">${esc(DERM.name)}</strong>
+              <div class="tiny">${fmtDate(rv.confirmedAt)} · ${fmtTime(rv.confirmedAt)}</div>
+            </div>
+            <span class="verified">${ico.check} Dermatologist reviewed</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:26px">${startChooser(rt)}</div>
+
+      <div class="notice">${ico.shield}<div>This report describes the visible appearance of your skin and recommends cosmetic skincare. It is not a diagnosis or a prescription for medicine. Anything persistent, painful or changing needs in-person medical care.</div></div>
+    </div></div>`,
+    after() { bindStartChooser(rt); }
+  };
+};
+
 /* ===================== VIEW: YOUR SKIN LINE ===================== */
 function prodCard(p, i, item, opts) {
   opts = opts || {};
@@ -2006,29 +2249,7 @@ Views.routine = () => {
         <a class="btn btn--sm btn--ghost" href="#/messages" style="margin-left:auto">${ico.chat} Message about my routine</a>
       </div>
 
-      <div class="card card--pad-lg reveal" style="margin-bottom:26px">
-        <span class="card__label">Choose how to start</span>
-        <div class="grid g2" style="margin:0 0 18px">
-          <label class="pickbox is-on" data-buy="trial">
-            <div class="pickbox__top">
-              <span><strong style="font-weight:500">14-day sample kit</strong><br>
-                <span class="tiny">Every step in sample size. Two weeks to judge tolerance before spending more.</span></span>
-              <input type="radio" name="startWith" value="trial" checked>
-            </div>
-            <div class="rowbetween" style="margin-top:12px"><span class="price">${money(kitPrice)}</span><span class="pill pill--gold">−25% bundle</span></div>
-          </label>
-          <label class="pickbox" data-buy="full">
-            <div class="pickbox__top">
-              <span><strong style="font-weight:500">The whole routine, full size</strong><br>
-                <span class="tiny">Skip the trial and buy all ${Engine.routineProducts(r).length} products outright.</span></span>
-              <input type="radio" name="startWith" value="full">
-            </div>
-            <div class="rowbetween" style="margin-top:12px"><span class="price">${money(fullTotal)}</span><span class="tiny">${money(monthly)}/mo if you subscribe later</span></div>
-          </label>
-        </div>
-        <button class="btn btn--lg" id="buyNow">Add to basket &amp; check out ${ico.arrow}</button>
-        <p class="tiny" style="margin-top:12px">Either way you can review and rate each product afterwards, and convert to a monthly routine when you’re sure.</p>
-      </div>
+      ${startChooser(r)}
 
       <div class="split" style="align-items:start;gap:clamp(24px,3vw,44px)">
         <div>
@@ -2092,17 +2313,7 @@ Views.routine = () => {
       }));
       $('#addAllFull').addEventListener('click', () => Cart.addRoutine(r, 'full'));
       $('#addAllTrial').addEventListener('click', () => Cart.addRoutine(r, 'trial'));
-      let startWith = 'trial';
-      $$('[data-buy]').forEach(box => box.addEventListener('click', () => {
-        $$('[data-buy]').forEach(b => b.classList.remove('is-on'));
-        box.classList.add('is-on');
-        $('input', box).checked = true;
-        startWith = box.dataset.buy;
-      }));
-      $('#buyNow').addEventListener('click', () => {
-        Cart.addRoutine(r, startWith);
-        Router.go('/checkout?kind=' + startWith);
-      });
+      bindStartChooser(r);
       bindRatings();
     }
   };
@@ -2690,7 +2901,7 @@ Views.dashboard = () => {
           ${st.routine ? `
           <div class="card reveal reveal-d1">
             <div class="rowbetween" style="margin-bottom:12px"><span class="card__label" style="margin:0">Current routine</span>
-              <a class="link link--muted tiny" href="#/routine">View all</a></div>
+              <a class="link link--muted tiny" href="#/plan">Dermatologist’s report</a></div>
             ${Engine.routineProducts(st.routine).slice(0, 4).map((p, i) => `<div class="miniprod"><div class="miniprod__art">${art(p, 'db' + i)}</div>
               <div><b>${esc(p.name)}</b><span>${esc(p.cat)}</span></div></div>`).join('')}
             <hr class="hairline" style="margin:14px 0">
@@ -3274,18 +3485,31 @@ Views.order = () => {
         <hr class="hairline" style="margin:18px 0">
         <dl class="kv">
           <dt>Delivering to</dt><dd>${order.details && order.details.address ? esc(order.details.address.name) + ', ' + esc(order.details.address.line) + ', ' + esc(order.details.address.area) + ', ' + esc(order.details.address.gov) : 'Saved address'}</dd>
-          <dt>Payment</dt><dd>${esc((order.details && order.details.payment) || 'Demo')}</dd>
-          <dt>Estimated arrival</dt><dd>${fmtDate(order.eta)}</dd>
+          <dt>Payment</dt><dd>${esc((order.details && order.details.payment) || 'Demo')}${order.details && order.details.fee ? ' · incl. ' + money(order.details.fee) + ' cash handling' : ''}</dd>
+          <dt>Arriving</dt><dd><strong style="font-weight:500">${fmtDate(order.eta, { weekday: 'long', day: 'numeric', month: 'long' })}</strong>
+            <div class="tiny">Between ${fmtDate(order.eta, { day: 'numeric', month: 'short' })} and ${fmtDate(order.eta + DAY, { day: 'numeric', month: 'short' })}, 9am–9pm. You’ll get a text from the courier on the day.</div></dd>
+          <dt>Order placed</dt><dd>${fmtDate(order.at)} · ${fmtTime(order.at)}</dd>
         </dl>
         <div class="btnrow" style="margin-top:22px">
           ${isTrial ? '<a class="btn" href="#/trial">Open my 14-day tracker ' + ico.arrow + '</a>' : '<a class="btn" href="#/dashboard">Back to dashboard</a>'}
-          <a class="btn btn--ghost" href="#/routine">How to use my routine</a>
+          <a class="btn btn--ghost" href="#/plan">My dermatologist’s report</a>
         </div>
       </div>
 
+      <div class="card card--pad-lg" style="margin-top:20px;text-align:center;background:linear-gradient(160deg,rgba(168,131,78,.08),var(--surface))">
+        <h3 style="margin-bottom:10px">Thank you for choosing Lumea.</h3>
+        <p class="small" style="max-width:52ch;margin:0 auto">Your order is saved to your account — you’ll find it any time under Account → Order history. ${isTrial ? 'Your tracker opens today, so you can log how your skin feels from day one.' : 'Your routine is saved permanently, and you can convert it to a monthly delivery whenever you like.'}</p>
+      </div>
+
+      <div style="margin-top:20px">${feedbackCard(st.routine, {
+        pad: true,
+        title: 'How did we do?',
+        blurb: 'Rate the products, your dermatologist, or the whole Lumea experience. You can come back to this any time from your account.'
+      })}</div>
+
       <div class="notice" style="margin-top:20px">${ico.info}<div>Prototype order — nothing ships and no payment was taken. The order, trial and tracker states are stored in this browser so you can complete the journey.</div></div>
     </div></div>`,
-    after() {}
+    after() { bindFeedback(); }
   };
 };
 
@@ -3295,7 +3519,8 @@ Views.account = () => {
   const q = Router.query();
   const tab = q.tab || 'personal';
   const tabs = [['personal', 'Personal information'], ['skin', 'Skin profile'], ['routine', 'Saved routine'], ['orders', 'Order history'],
-    ['sub', 'Subscription'], ['pay', 'Payment methods'], ['msgs', 'Dermatologist conversations'], ['photos', 'Progress photos'],
+    ['sub', 'Subscription'], ['pay', 'Payment methods'], ['reviews', 'Ratings & reviews'],
+    ['msgs', 'Dermatologist conversations'], ['photos', 'Progress photos'],
     ['notif', 'Notifications'], ['privacy', 'Privacy & data']];
 
   const panels = {
@@ -3349,7 +3574,7 @@ Views.account = () => {
           <div style="flex:1"><span class="orderdone__id orderrow__id">${esc(o.id)}</span>
             <div class="tiny">${fmtDate(o.at)} · ${o.items.length} item${o.items.length > 1 ? 's' : ''} · ${esc(o.kind)}</div></div>
           <span class="pill">${esc(o.status)}</span>
-          <span class="price">${money(o.total)}</span>
+          <span class="price">${money(o.total + ((o.details && o.details.fee) || 0))}</span>
           <button class="btn btn--ghost btn--sm" data-order="${esc(o.id)}">View</button></div>`).join('')}
       </div>`
       : `<div class="empty"><h3>No orders yet</h3><p>Your trial kit and full-size orders will be listed here.</p></div>`,
@@ -3373,6 +3598,9 @@ Views.account = () => {
         <button class="btn btn--ghost btn--sm" id="addPay" style="margin-top:14px">Add a payment method</button>
         <div class="notice" style="margin-top:16px">${ico.shield}<div>Prototype only — card details are never stored or transmitted. Only a masked label is kept in this browser.</div></div>
       </div>`,
+    reviews: () => `
+      ${feedbackCard(st.routine, { pad: true, title: 'Ratings & reviews', blurb: 'Everything you have rated, and anything still waiting for your verdict.' })}
+      ${st.routine ? `<div style="margin-top:14px">${ratingsCard(Engine.routineProducts(st.routine).map(p => p.id), { pad: true, blurb: 'Your routine, product by product.' })}</div>` : ''}`,
     msgs: () => `
       <div class="card card--pad-lg"><span class="card__label">Dermatologist conversations</span>
         ${st.messages.length ? `<p class="small">${st.messages.length} messages with ${esc(DERM.name)}.</p>
@@ -3455,6 +3683,8 @@ Views.account = () => {
       }));
 
       $$('[data-order]').forEach(b => b.addEventListener('click', () => Router.go('/order?id=' + b.dataset.order)));
+      bindFeedback();
+      bindRatings();
 
       const addPay = $('#addPay');
       if (addPay) addPay.addEventListener('click', () => UI.modal(`<h3>Add a payment method</h3>
@@ -3515,6 +3745,7 @@ const ROUTES = {
   'dashboard':    { view: 'dashboard' },
   'analyze':      { view: 'analyze' },
   'report':       { view: 'report' },
+  'plan':         { view: 'plan', gate: 'routine' },
   'routine':      { view: 'routine', gate: 'routine' },
   'trial':        { view: 'trial', gate: 'trial' },
   'progress':     { view: 'progress', gate: 'review' },
@@ -3562,7 +3793,7 @@ const Router = {
     document.title = ({
       landing: 'Lumea Skin Studio', signin: 'Sign in · Lumea', signup: 'Create account · Lumea',
       dashboard: 'Dashboard · Lumea', analyze: 'Skin analysis · Lumea', report: 'Your skin analysis · Lumea',
-      routine: 'Your skin line · Lumea', trial: '14-day trial · Lumea', progress: 'Skin progress · Lumea',
+      plan: 'Your dermatologist’s report · Lumea', routine: 'Your skin line · Lumea', trial: '14-day trial · Lumea', progress: 'Skin progress · Lumea',
       messages: 'Messages · Lumea', subscription: 'Subscription · Lumea', basket: 'Basket · Lumea',
       checkout: 'Checkout · Lumea', order: 'Order confirmed · Lumea', account: 'Account · Lumea',
       derm: 'Clinician review · Lumea'

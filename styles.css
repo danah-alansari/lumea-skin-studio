@@ -889,3 +889,43 @@ html{scroll-behavior:smooth}
 .starline{color:var(--gold);letter-spacing:.09em;font-size:.82rem}
 .reviewcard{padding:16px 0;border-top:1px solid var(--line-2)}
 .reviewcard:first-of-type{border-top:0;padding-top:4px}
+
+/* ---------- 23. DERMATOLOGIST'S REPORT (document) ---------- */
+.doc{
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);
+  box-shadow:var(--shadow-m);overflow:hidden
+}
+.doc__head{
+  padding:clamp(20px,2.8vw,30px) clamp(20px,3vw,36px);
+  background:linear-gradient(150deg,var(--shell),var(--surface-2));
+  border-bottom:1px solid var(--line);
+  display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;align-items:flex-start
+}
+.doc__meta{display:flex;gap:clamp(18px,3vw,42px);flex-wrap:wrap}
+.doc__meta>div{display:flex;flex-direction:column;gap:1px}
+.doc__meta strong{font-weight:500;font-size:.94rem}
+.doc__body{padding:clamp(22px,3.2vw,40px)}
+.doc__sign{
+  margin-top:26px;padding-top:20px;border-top:1px solid var(--line);
+  display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap
+}
+.rx{border-top:1px solid var(--line-2)}
+.rxrow{
+  display:grid;grid-template-columns:26px 54px 1fr auto;gap:14px;align-items:center;
+  padding:15px 0;border-bottom:1px solid var(--line-2)
+}
+.rxrow__n{
+  width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;
+  font-family:var(--serif);font-size:.8rem;color:var(--gold)
+}
+.rxrow__art{width:54px;height:62px;border-radius:6px;overflow:hidden;background:var(--shell)}
+.rxrow__body{min-width:0}
+.rxrow__when{
+  font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--char-2);
+  padding:6px 12px;border-radius:var(--r-pill);background:var(--shell);border:1px solid var(--line-2);white-space:nowrap
+}
+@media (max-width:620px){
+  .rxrow{grid-template-columns:24px 44px 1fr;gap:11px}
+  .rxrow__art{width:44px;height:52px}
+  .rxrow__when{grid-column:2/-1;justify-self:start}
+}
