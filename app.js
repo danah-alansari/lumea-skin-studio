@@ -573,8 +573,8 @@ const Ratings = {
 
 /* ===================== REVIEW (dermatologist turnaround) ===================== */
 /* A real review takes hours; the prototype turns it around in seconds so the
-   journey can be walked in one sitting. The clinician portal does exactly the
-   same thing through Review.release() when you'd rather drive it by hand. */
+   patient journey can be walked in one sitting. release() builds the routine
+   from the proposal, writes the clinician's note and opens the report. */
 const REVIEW_DELAY = 7000;
 const Review = {
   timer: null,
@@ -784,7 +784,6 @@ const Shell = {
         '<a href="#/subscription" role="menuitem">Subscription' + (st.subscription && st.subscription.status === 'active' ? '<span class="pill pill--sage">Active</span>' : '') + '</a>' +
         '<a href="#/basket" role="menuitem">Basket</a>' +
         '<hr class="hairline" style="margin:6px 0">' +
-        '<a href="#/derm" role="menuitem">Dermatologist portal <span class="tiny">demo</span></a>' +
         '<button class="danger" id="logoutBtn" role="menuitem">Log out</button>' +
       '</div>';
     const btn = $('#avatarBtn'), drop = $('#acctDrop');
@@ -1748,17 +1747,14 @@ Views.report = () => {
     return `
       <div class="reviewbar reviewbar--pending reveal">
         <span class="dermface">${esc(initials(DERM.name))}</span>
-        <div><strong style="font-weight:500"><span class="dot dot--live" style="display:inline-block;margin-right:6px"></span>${rv.status === 'info' ? 'More information requested' : 'Pending dermatologist review'}</strong>
-          <div class="small">${rv.status === 'info' ? esc(rv.requests[rv.requests.length - 1] || 'Your dermatologist has asked a question in Messages.') : 'With ' + esc(DERM.name) + ' now — your routine is released the moment she confirms.'}</div></div>
+        <div><strong style="font-weight:500">${ico.check} Request approved</strong>
+          <div class="small">${esc(DERM.name)} has your report and is preparing your recommendations. This page updates itself the moment it arrives.</div></div>
         <div class="btnrow" style="margin-left:auto">
-          ${rv.status === 'pending' ? '<span class="pill pill--gold"><span class="spinner"></span>Reviewing now</span>' : ''}
+          <span class="pill pill--gold"><span class="spinner"></span>Preparing your report</span>
           <a class="btn btn--sm btn--ghost" href="#/messages">Message</a>
-          <a class="btn btn--sm" href="#/derm">Open dermatologist portal</a>
         </div>
       </div>
-      <p class="tiny reveal" style="margin-top:10px">${rv.status === 'pending'
-        ? 'Reviews come back in seconds in this prototype — this page updates itself. Or step into the portal and confirm it yourself as the clinician.'
-        : 'Prototype note: the portal lets you act as the reviewing dermatologist to continue the journey.'}</p>`;
+      <p class="tiny reveal" style="margin-top:10px">You don’t need to do anything — your report and recommended products will appear here and in Messages.</p>`;
   };
 
   return {
@@ -1828,12 +1824,13 @@ Views.report = () => {
         Review.schedule();
         Shell.render();
         Router.render();
-        UI.modal(`<span class="pill pill--gold" style="margin-bottom:14px">Pending dermatologist review</span>
+        UI.modal(`<div class="center"><div class="orderdone__seal">${ico.check}</div>
+          <span class="eyebrow">Request approved</span>
           <h3>Your report is with ${esc(DERM.name)}.</h3>
-          <p class="small">She’s reading it now — in this prototype the review comes back within seconds, and your routine unlocks on its own. You’ll see it here, on your dashboard and in Messages.</p>
-          <div class="notice notice--gold" style="margin:18px 0">${ico.info}<div>This is a prototype, so you can also step into the <strong>dermatologist portal</strong> and complete the review yourself to continue the journey.</div></div>
-          <div class="btnrow"><a class="btn btn--sm" href="#/derm" data-close>Open the portal</a>
-          <a class="btn btn--ghost btn--sm" href="#/dashboard" data-close>Back to dashboard</a></div>`);
+          <p class="small">She’s reviewing it now. Your report and your recommended products will arrive here in a moment — nothing else is needed from you.</p>
+          <div class="btnrow" style="justify-content:center;margin-top:20px">
+            <a class="btn btn--sm btn--gold" href="#/report" data-close>Wait here</a>
+            <a class="btn btn--ghost btn--sm" href="#/dashboard" data-close>Back to dashboard</a></div></div>`);
       });
     }
   };
@@ -2319,182 +2316,6 @@ Views.routine = () => {
   };
 };
 
-/* ===================== VIEW: DERMATOLOGIST PORTAL (simulated) ===================== */
-Views.derm = () => {
-  const st = Store.state(), u = Store.user();
-  if (!st.report) return { html: '', after() { UI.toast('Complete a skin analysis first.', 'warn'); Router.go('/analyze'); } };
-  const r = st.report, rv = st.review;
-  if (!rv.proposal) Store.commit(s => { s.review.proposal = Engine.buildRoutine(r, {}); });
-  const prop = Store.state().review.proposal;
-
-  const statusPill = rv.status === 'confirmed' ? '<span class="pill pill--sage">Reviewed &amp; released</span>'
-    : rv.status === 'info' ? '<span class="pill pill--clay">Awaiting patient response</span>'
-    : rv.status === 'pending' ? '<span class="pill pill--gold"><span class="dot"></span>Pending review</span>'
-    : '<span class="pill">Not yet submitted</span>';
-
-  return {
-    html: `<div class="portal">
-      <div class="portal__bar">
-        <a class="brand" href="#/dashboard" style="color:#F6F1E9"><span class="brand__mark" style="color:var(--gold-soft)">
-          <svg viewBox="0 0 32 32" width="24" height="24"><circle cx="16" cy="16" r="12.5" fill="none" stroke="currentColor" stroke-width="1"/></svg></span>
-          <span class="brand__word">LUMEA</span></a>
-        <span style="opacity:.4">/</span><span style="font-size:.8rem;letter-spacing:.14em;text-transform:uppercase;color:#B4AA9E">Clinician review</span>
-        <span class="portal__demo">Prototype — you are acting as the dermatologist</span>
-        <a class="btn btn--ghost btn--sm" href="#/dashboard" style="margin-left:auto">← Back to patient view</a>
-      </div>
-
-      <div class="wrap" style="padding:0">
-        <div class="rowbetween" style="margin-bottom:26px">
-          <div><span class="eyebrow">Review queue · 1 case</span><h1 style="font-size:clamp(1.7rem,3vw,2.4rem)">${esc(u.name)}</h1></div>
-          ${statusPill}
-        </div>
-
-        <div class="split" style="align-items:start;gap:26px">
-          <div>
-            <div class="card" style="margin-bottom:16px">
-              <span class="card__label">Patient profile</span>
-              <div class="split" style="gap:22px;align-items:start">
-                <dl class="kv">
-                  <dt>Name</dt><dd>${esc(u.name)}</dd>
-                  <dt>Email</dt><dd>${esc(u.email)}</dd>
-                  <dt>Age</dt><dd>${st.profile.age ? esc(st.profile.age) : 'Not provided'}</dd>
-                  <dt>Member since</dt><dd>${fmtDate(u.createdAt)}</dd>
-                  <dt>Photo taken</dt><dd>${st.photoAt ? fmtDate(st.photoAt) + ' · ' + fmtTime(st.photoAt) : '—'}</dd>
-                  <dt>Report</dt><dd>${fmtDate(r.createdAt)} · ${fmtTime(r.createdAt)}</dd>
-                  <dt>Previous routine</dt><dd>${st.routine ? 'v' + st.routine.version + ' on file' : 'None on file'}</dd>
-                </dl>
-                <div class="patientshot">${st.photo ? `<img src="${st.photo}" alt="Patient submitted photograph">` : ''}</div>
-              </div>
-              <hr class="hairline" style="margin:20px 0;border-color:rgba(237,231,222,.12)">
-              <span class="card__label">Reported concerns</span>
-              <div class="chips" style="margin-bottom:16px">${r.concerns.map(c => `<span class="tag" style="background:#241F1B;border-color:rgba(237,231,222,.12);color:#D6CEC3">${esc(cLabel(c))}</span>`).join('')}</div>
-              ${st.priorities.length ? `<span class="card__label">Stated priorities</span><p class="small" style="margin:0 0 16px">${st.priorities.map((p, i) => (i + 1) + '. ' + cLabel(p)).join('  ·  ')}</p>` : ''}
-              <span class="card__label">Patient notes</span>
-              <p class="small" style="margin:0">${st.notes ? esc(st.notes) : '<span style="opacity:.6">None provided.</span>'}</p>
-            </div>
-
-            <div class="card" style="margin-bottom:16px">
-              <span class="card__label">AI-assisted analysis · ${esc(r.engine)}</span>
-              <div class="reportgrid">
-                ${r.metrics.map(m => `<div class="meter" data-tone="${m.tone}">
-                  <div class="meter__top"><span class="meter__name">${esc(m.label)}</span><span class="meter__level">${esc(m.word)}</span></div>
-                  <div class="meter__track"><span class="meter__fill" data-v="${m.value}"></span></div></div>`).join('')}
-              </div>
-              <p class="small" style="margin:16px 0 0">Composite score ${r.score} (${esc(r.band)}). Model output is advisory; clinician judgement governs the released routine.</p>
-            </div>
-
-            <div class="card">
-              <span class="card__label">Proposed routine — ${st.routine ? 'released' : 'not yet released'}</span>
-              <div class="prodlist">
-                ${prop.am.concat(prop.pm).filter((x, i, a) => a.findIndex(y => y.id === x.id) === i).map((it, i) => {
-                  const p = P(it.id);
-                  return `<div class="prod" style="grid-template-columns:56px 1fr auto;padding:12px">
-                    <div class="prod__art" style="width:56px;height:64px">${art(p, 'd' + i)}</div>
-                    <div><div class="prod__cat">${esc(p.cat)}</div><div class="prod__name" style="font-size:1rem">${esc(p.name)}</div>
-                    <div class="tiny">${esc(p.ing.join(' · '))}</div></div>
-                    <button class="btn btn--ghost btn--sm" data-dswap="${p.id}">${ico.swap} Replace</button></div>`;
-                }).join('')}
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <div class="card" style="margin-bottom:16px">
-              <span class="card__label">Clinician actions</span>
-              <div class="field"><label>Note to patient</label>
-                <textarea class="textarea" id="dermNote" placeholder="e.g. Analysis confirmed. Barrier support is the priority — begin the retinal twice weekly only.">${esc(rv.notes || '')}</textarea></div>
-              <div class="btnrow" style="flex-direction:column;align-items:stretch">
-                <button class="btn btn--block" id="confirmBtn">${ico.check} Confirm analysis &amp; release routine</button>
-                <button class="btn btn--ghost btn--block" id="infoBtn">Request more information</button>
-                <button class="btn btn--ghost btn--block" id="msgBtn">${ico.chat} Message patient</button>
-              </div>
-              <p class="tiny" style="margin-top:14px">Confirming releases the routine to the patient and unlocks their trial kit.</p>
-            </div>
-
-            <div class="card card--flat" style="background:#211D19;border-color:rgba(237,231,222,.1)">
-              <span class="card__label">Reviewing clinician</span>
-              <div class="dermcard">
-                <span class="dermface">${esc(initials(DERM.name))}</span>
-                <div><strong style="font-weight:500;color:#F6F1E9">${esc(DERM.name)}</strong>
-                <div class="small">${esc(DERM.title)}</div><div class="verified">${ico.check} ${esc(DERM.reg)}</div></div>
-              </div>
-            </div>
-
-            <div class="notice" style="margin-top:16px">${ico.info}<div>Clinician-facing screen included so the prototype can demonstrate the full review loop. In production this would be a separate authenticated application.</div></div>
-          </div>
-        </div>
-      </div>
-    </div>`,
-    after() {
-      UI.meters();
-      $$('[data-dswap]').forEach(b => b.addEventListener('click', () => {
-        const pid = b.dataset.dswap, p = P(pid), inAm = prop.am.some(x => x.id === pid);
-        replaceModal(p.role, inAm ? 'am' : 'pm', pid, (newId) => {
-          Store.commit(s => {
-            ['am', 'pm'].forEach(k => s.review.proposal[k].forEach(x => { if (x.id === pid) x.id = newId; }));
-            s.review.adjustments.push({ at: now(), from: pid, to: newId });
-            if (s.routine) { ['am', 'pm'].forEach(k => s.routine[k].forEach(x => { if (x.id === pid) x.id = newId; })); s.routine.version += 1; }
-          });
-          UI.toast('Recommendation adjusted · ' + P(newId).name, 'good');
-          Router.render();
-        });
-      }));
-
-      $('#confirmBtn').addEventListener('click', () => {
-        clearTimeout(Review.timer);
-        Review.release($('#dermNote').value.trim() || null);
-        Shell.render();
-        Router.render();
-        UI.modal(`<div class="center"><div class="orderdone__seal">${ico.check}</div>
-          <span class="eyebrow">Review complete</span>
-          <h3>Routine released to ${esc(Store.user().name.split(' ')[0])}.</h3>
-          <p class="small">The patient’s personalised routine is now unlocked, along with their 14-day trial kit.</p>
-          <div class="btnrow" style="justify-content:center;margin-top:20px">
-            <a class="btn btn--sm btn--gold" href="#/routine" data-close>View as patient</a>
-            <a class="btn btn--ghost btn--sm" href="#/dashboard" data-close>Patient dashboard</a></div></div>`);
-      });
-
-      $('#infoBtn').addEventListener('click', () => {
-        UI.modal(`<h3>Request more information</h3>
-          <p class="small">The patient is asked for more detail and the routine stays unreleased.</p>
-          <div class="field" style="margin-top:16px"><label>Your question</label>
-            <textarea class="textarea" id="infoQ">Could you send a second photograph in natural daylight, without makeup, and let me know whether you are currently using any prescription treatments?</textarea></div>
-          <button class="btn btn--block" data-ok>Send request</button>`, {
-          after(m) {
-            $('[data-ok]', m).addEventListener('click', () => {
-              clearTimeout(Review.timer);
-              const q = $('#infoQ', m).value.trim() || 'Could you send a second photograph in natural daylight?';
-              Store.commit(s => {
-                s.review.status = 'info';
-                s.review.requests.push(q);
-                s.messages.push({ id: uid('m'), who: 'derm', text: q, at: now() });
-                s.history.push({ at: now(), t: 'Dermatologist requested more information' });
-              });
-              UI.closeModal(); Shell.render(); Router.render();
-              UI.toast('Request sent to the patient', 'good');
-            });
-          }
-        });
-      });
-
-      $('#msgBtn').addEventListener('click', () => {
-        UI.modal(`<h3>Message patient</h3>
-          <div class="field" style="margin-top:14px"><label>Message</label><textarea class="textarea" id="dm"></textarea></div>
-          <button class="btn btn--block" data-ok>Send message</button>`, {
-          after(m) {
-            $('[data-ok]', m).addEventListener('click', () => {
-              const t = $('#dm', m).value.trim();
-              if (!t) return;
-              Store.commit(s => s.messages.push({ id: uid('m'), who: 'derm', text: t, at: now() }));
-              UI.closeModal(); UI.toast('Message sent to patient', 'good');
-            });
-          }
-        });
-      });
-    }
-  };
-};
-
 /* ===================== VIEW: 14-DAY TRIAL ===================== */
 Views.trial = () => {
   const st = Store.state();
@@ -2831,7 +2652,7 @@ Views.dashboard = () => {
 
   const stageCta = {
     analysis: st.photo ? ['Continue analysis', '#/analyze'] : ['Start my skin analysis', '#/analyze'],
-    review: st.review.status === 'none' ? ['Send report to dermatologist', '#/report'] : ['Open dermatologist portal', '#/derm'],
+    review: st.review.status === 'none' ? ['Send report to dermatologist', '#/report'] : ['See my request', '#/report'],
     routine: ['View my routine', '#/routine'],
     trial: st.trial ? ['Open my 14-day tracker', '#/trial'] : ['Start my 14-day trial', '#/trial'],
     subscription: ['Set up my monthly routine', '#/subscription']
@@ -2840,7 +2661,7 @@ Views.dashboard = () => {
     profile: 'Account created ' + fmtDate(u.createdAt),
     analysis: st.report ? 'AI-assisted analysis completed ' + fmtDate(st.report.createdAt) : (st.photo ? 'Photo uploaded — concerns still needed' : 'Photo not yet uploaded'),
     review: st.review.status === 'confirmed' ? 'Confirmed by ' + DERM.name + ' on ' + fmtDate(st.review.confirmedAt)
-      : st.review.status === 'pending' ? 'With ' + DERM.name + ' now — confirmation lands in seconds'
+      : st.review.status === 'pending' ? 'Request approved — ' + DERM.name + ' is preparing your report'
       : st.review.status === 'info' ? 'Your dermatologist has asked for more information'
       : 'Not yet submitted',
     routine: st.routine ? Engine.routineProducts(st.routine).length + ' products approved · v' + st.routine.version : 'Locked until dermatologist review is complete',
@@ -3461,7 +3282,7 @@ Views.order = () => {
     html: `<div class="view--app"><div class="wrap wrap--narrow">
       <div class="orderdone viewin">
         <div class="orderdone__seal">${ico.check}</div>
-        <span class="eyebrow eyebrow--gold">Order ${esc(order.id)}</span>
+        <span class="eyebrow eyebrow--gold">Receipt · ${esc(order.id)}</span>
         <h1 style="font-size:clamp(1.9rem,3.6vw,2.8rem)">${isTrial ? 'Your 14-day trial is on its way.' : 'Order confirmed.'}</h1>
         <p class="lede" style="margin:14px auto 0;text-align:center">${isTrial
           ? 'Your sample kit ships within 24 hours. Your tracker is open now, so you can start logging from day one.'
@@ -3470,7 +3291,7 @@ Views.order = () => {
 
       <div class="card card--pad-lg" style="margin-top:30px">
         <div class="rowbetween" style="margin-bottom:16px">
-          <span class="card__label" style="margin:0">Summary</span>
+          <span class="card__label" style="margin:0">Receipt</span>
           <span class="pill pill--sage">${esc(order.status)}</span>
         </div>
         ${order.items.map((it, i) => { const p = P(it.id);
@@ -3569,13 +3390,13 @@ Views.account = () => {
       </div>`
       : `<div class="empty"><h3>No saved routine</h3><p>Your routine is saved here permanently once a dermatologist approves it.</p></div>`,
     orders: () => st.orders.length ? `
-      <div class="card card--pad-lg"><span class="card__label">Order history</span>
+      <div class="card card--pad-lg"><span class="card__label">Order history &amp; receipts</span>
         ${st.orders.map(o => `<div class="orderrow">
           <div style="flex:1"><span class="orderdone__id orderrow__id">${esc(o.id)}</span>
             <div class="tiny">${fmtDate(o.at)} · ${o.items.length} item${o.items.length > 1 ? 's' : ''} · ${esc(o.kind)}</div></div>
           <span class="pill">${esc(o.status)}</span>
           <span class="price">${money(o.total + ((o.details && o.details.fee) || 0))}</span>
-          <button class="btn btn--ghost btn--sm" data-order="${esc(o.id)}">View</button></div>`).join('')}
+          <button class="btn btn--ghost btn--sm" data-order="${esc(o.id)}">View receipt</button></div>`).join('')}
       </div>`
       : `<div class="empty"><h3>No orders yet</h3><p>Your trial kit and full-size orders will be listed here.</p></div>`,
     sub: () => st.subscription ? `
@@ -3754,8 +3575,7 @@ const ROUTES = {
   'basket':       { view: 'basket' },
   'checkout':     { view: 'checkout' },
   'order':        { view: 'order' },
-  'account':      { view: 'account' },
-  'derm':         { view: 'derm' }
+  'account':      { view: 'account' }
 };
 
 const Router = {
@@ -3777,8 +3597,13 @@ const Router = {
     UI.closeModal();
 
     const p = this.path();
-    const route = ROUTES[p] || ROUTES[''];
+    const known = Object.prototype.hasOwnProperty.call(ROUTES, p);
+    const route = known ? ROUTES[p] : ROUTES[''];
     const signed = !!Store.session();
+
+    /* an unknown path (an old bookmark, a stale link) should land somewhere sensible
+       rather than paint the marketing page over the signed-in app shell */
+    if (!known) { this.go(signed ? '/dashboard' : '/'); return; }
 
     if (!route.pub && !signed) { UI.toast('Please sign in to continue.', 'warn'); this.go('/signin'); return; }
     if (signed && (route.guestOnly || p === '' || p === '/')) { this.go('/dashboard'); return; }
@@ -3795,8 +3620,7 @@ const Router = {
       dashboard: 'Dashboard · Lumea', analyze: 'Skin analysis · Lumea', report: 'Your skin analysis · Lumea',
       plan: 'Your dermatologist’s report · Lumea', routine: 'Your skin line · Lumea', trial: '14-day trial · Lumea', progress: 'Skin progress · Lumea',
       messages: 'Messages · Lumea', subscription: 'Subscription · Lumea', basket: 'Basket · Lumea',
-      checkout: 'Checkout · Lumea', order: 'Order confirmed · Lumea', account: 'Account · Lumea',
-      derm: 'Clinician review · Lumea'
+      checkout: 'Checkout · Lumea', order: 'Your receipt · Lumea', account: 'Account · Lumea'
     })[route.view] || 'Lumea Skin Studio';
 
     Shell.render();

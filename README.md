@@ -38,6 +38,7 @@ then open `http://localhost:8899`.
 | `Review` | Dermatologist turnaround — `release()` is shared by the automatic path and the clinician portal | `POST /reviews`, or a webhook when a real clinician confirms |
 | `Ratings` | Per-product star rating + written review; community figures derived from the product id | `GET/POST /products/:id/reviews` |
 | `Chat` | Dermatologist reply simulation (keyword-matched) | Real messaging endpoint / websocket |
+| `Views.plan` | The dermatologist's report: letterhead, assessment, prescribed routine with when-to-use per step | `GET /reports/:id` |
 | `UI` | Toasts, modals, reveal-on-scroll, curtain transitions, skeletons | — |
 | `Views` | One function per screen, each returning `{ html, after() }` | — |
 | `Router` | Hash routing with auth + stage guards | — |
@@ -51,14 +52,18 @@ navigation history:
 
 ```
 Sign up → Photo → Concerns → AI analysis → Send to dermatologist
-  → Pending review → Dermatologist confirms → Routine released
-  → 14-day trial → Check-ins + chat → Monthly subscription
+  → Request approved → Report + recommended products returned
+  → Choose sample kit or full routine → Pay (KNET / card / cash) → Receipt
+  → 14-day trial → Check-ins + chat → Rate products, clinician, service
+  → Monthly subscription
 ```
 
 - **My Routine** is locked until `review.status === 'confirmed'`.
 - **The trial** is locked until a routine exists.
 - **Subscription** opens from day 7 of the trial (or after 3 check-ins) — or immediately if the routine was bought full size instead of trialled.
 - Locked nav items say *why* they're locked instead of failing silently.
+- Receipts live at `#/order?id=…`, and every purchase is listed under Account → Order history &amp; receipts.
+- Members can rate products, their dermatologist and the overall service (Account → Ratings &amp; reviews).
 - Updating your concerns produces a fresh report and returns you to pending review;
   the previously approved routine stays saved to the account meanwhile.
 
@@ -66,10 +71,9 @@ Once a report is sent for review, `Review.schedule()` turns it around in about s
 seconds and releases the routine on its own — the pending screen updates itself, and the
 timer resumes correctly after a reload. Asking the patient for more information cancels it.
 
-Because there is no server, the prototype also includes a **dermatologist portal** at `#/derm`
-(also in the account menu) where you act as the reviewing clinician: read the case, adjust
-the recommended products, confirm the analysis, request more information, or message the
-patient. Confirming is what releases the routine.
+The journey is patient-side only — there is no clinician screen. Sending the report shows
+**Request approved**, and `Review.release()` returns the dermatologist's report and the
+recommended products on its own.
 
 Trial days don't wait for real time — the tracker has an explicit *Advance 1 day* /
 *Jump to day N* control, labelled as a prototype control.

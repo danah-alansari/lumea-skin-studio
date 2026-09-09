@@ -759,27 +759,6 @@ hr{border:0;border-top:1px solid var(--line);margin:0}
 .switch.is-on{background:var(--sage);border-color:var(--sage)}
 .switch.is-on::after{transform:translateX(18px)}
 
-/* ---------- 18. DERM PORTAL ---------- */
-.portal{--ivory:#12100E;background:#12100E;color:#EDE7DE;min-height:100vh;padding:34px var(--pad) 90px}
-.portal h1,.portal h2,.portal h3,.portal h4{color:#FBF7F1}
-.portal .card{background:#1A1714;border-color:rgba(237,231,222,.12);box-shadow:none;color:#D6CEC3}
-.portal .eyebrow{color:#9A8F82}
-.portal .small,.portal .lede{color:#B4AA9E}
-.portal .kv dt{color:#8E8478}
-.portal .kv dd{color:#EDE7DE}
-.portal .meter{background:#211D19;border-color:rgba(237,231,222,.1)}
-.portal .meter__track{background:rgba(237,231,222,.1)}
-.portal .meter__level{color:#FBF7F1}
-.portal .btn--ghost{--fg:#EDE7DE;--bd:rgba(237,231,222,.24)}
-.portal .btn--ghost:hover{--bd:#EDE7DE}
-.portal .input,.portal .textarea,.portal .select{background:#211D19;border-color:rgba(237,231,222,.14);color:#EDE7DE}
-.portal .notice{background:#211D19;border-color:rgba(237,231,222,.1);color:#B4AA9E}
-.portal .prod{background:#1A1714;border-color:rgba(237,231,222,.12)}
-.portal__bar{display:flex;align-items:center;gap:14px;padding-bottom:22px;margin-bottom:26px;border-bottom:1px solid rgba(237,231,222,.12);flex-wrap:wrap}
-.portal__demo{font-size:.66rem;letter-spacing:.18em;text-transform:uppercase;padding:5px 11px;border-radius:var(--r-pill);background:rgba(201,168,112,.14);color:#D9BE8C;border:1px solid rgba(201,168,112,.34)}
-.patientshot{border-radius:var(--r-m);overflow:hidden;aspect-ratio:1/1.15;background:#211D19;border:1px solid rgba(237,231,222,.12)}
-.patientshot img{width:100%;height:100%;object-fit:cover}
-
 /* ---------- 19. OVERLAYS ---------- */
 .toaster{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:160;display:flex;flex-direction:column;gap:9px;align-items:center;pointer-events:none;width:calc(100% - 32px);max-width:430px}
 .toast{
