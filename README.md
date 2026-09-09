@@ -1,7 +1,8 @@
 # LUMEA — Skin Studio
 
 A front-end prototype of an AI-assisted skin analysis + dermatologist-reviewed skincare platform.
-HTML5 + CSS3 + vanilla JavaScript. No backend, no build step, no dependencies (Google Fonts only).
+HTML5 + CSS3 + vanilla JavaScript, backed by **Supabase** (Postgres + Auth + Storage).
+No build step. One runtime dependency: `@supabase/supabase-js` (pinned, from jsdelivr).
 
 ## Files
 
@@ -23,14 +24,34 @@ then open `http://localhost:8899`.
 
 ## Demo account
 
-`demo@lumea.co` / `demo1234` — or create your own; everything persists in `localStorage`.
+`demo@lumea.co` / `demo1234` — a real, pre-confirmed Supabase account, so anything you do is
+saved server-side and waiting on any device. Or create your own: sign-up sends a confirmation
+email, and the app shows a *Check your email* screen until you click the link.
+
+## Backend
+
+| Piece | Where |
+| --- | --- |
+| Postgres | Supabase project `lumea-skin-studio` (`jwfxasnjbyvodtfuymic`), eu-central-1 |
+| Identity | Supabase Auth — passwords never touch application tables |
+| Photographs | Private `skin-photos` bucket, path `{user_id}/{uuid}.jpg`, served as signed URLs |
+| Access control | RLS on all 33 tables; a member can only read and write their own rows |
+
+Two `SECURITY DEFINER` functions are the only sanctioned write paths for clinician-owned data,
+because RLS deliberately forbids a member from authoring their own routine:
+
+- `release_review(analysis, items, notes)` — confirms the review and writes routine + items
+- `set_routine_items(routine, items)` — replaces the steps of a routine you own
+
+Both verify `auth.uid()` owns the row before doing anything.
 
 ## Module map in `app.js`
 
 | Module | Responsibility | Backend swap |
 | --- | --- | --- |
 | `Util` | DOM + formatting helpers, inline icon set | — |
-| `Store` | Persistence, session, per-user state | Replace each `Store.*` method with an API call; shape is already user-scoped |
+| `Cloud` | Supabase client, auth, `hydrate()` (server → state) and `push()` (state → server, debounced) | This *is* the API layer |
+| `Store` | In-memory state + localStorage cache; every `commit()` queues a cloud push | — |
 | `Catalog` | `CONCERNS`, `PRODUCTS`, inline SVG product art | `GET /products` |
 | `Engine` | `analyse()` (AI-assisted report), `buildRoutine()` (product selection) | `POST /analyze`, `POST /routine` — both are pure functions of their inputs |
 | `Journey` | Stage machine + gating (`status()`, `can()`, `reason()`) | Server-authoritative stage |
@@ -80,14 +101,25 @@ Trial days don't wait for real time — the tracker has an explicit *Advance 1 d
 
 ## What persists
 
-Account, session, profile, photo, concerns and priorities, notes, AI report, review status
-and clinician notes, routine (with version), basket, saved-for-later, orders, trial day and
-check-in logs, subscription state, chat transcript, progress photos, skin ratings, product
-reviews and star ratings, settings.
-Refreshing or signing out and back in resumes exactly where you left off.
+Everything, in Postgres: profile, address, concerns and priorities, photographs, the AI
+report with its seven indicators and three focus areas, the review decision and clinician
+note, the versioned routine and its steps, basket, orders and receipts, trial and check-in
+logs, subscription, chat transcript, product/clinician/service reviews, skin ratings,
+settings and the activity feed.
 
-Photographs are downscaled to 760px JPEG in-browser before storage, and never leave the
-browser. Account → Privacy & data shows everything held and deletes it.
+Rendering stays synchronous: `Cloud.hydrate()` loads the account into the same state shape
+the views already expect, then `Cloud.push()` writes changes back (debounced, idempotent,
+per-domain, so one failure never blocks the rest). localStorage is only a paint cache — the
+server is the authority, and a stale local session is never honoured.
+
+Photographs are downscaled to 760px JPEG in-browser, uploaded to a private bucket, and
+displayed through short-lived signed URLs.
+
+### Still to configure
+
+- Supabase → Authentication → URL Configuration: set **Site URL** to the deployed origin,
+  or confirmation links in sign-up emails will point at `localhost:3000`.
+- Supabase → Authentication: **leaked password protection** is off (flagged by the linter).
 
 ## Medical framing
 

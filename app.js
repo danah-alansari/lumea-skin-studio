@@ -70,28 +70,41 @@ const Store = {
   boot() {
     try { this.db = JSON.parse(localStorage.getItem(KEY)) || null; } catch (e) { this.db = null; }
     if (!this.db || !this.db.users) this.db = { users: [], session: null, data: {}, seeded: false };
+    /* pre-Supabase caches held local accounts and passwords; discard them */
+    if (this.db.users.length || (this.db.session && /^usr_/.test(this.db.session.userId || ''))) {
+      this.db.users = []; this.db.session = null;
+      Object.keys(this.db.data).forEach(k => { if (/^usr_/.test(k)) delete this.db.data[k]; });
+      this.save();
+    }
     if (!this.db.seeded) { this.seed(); }
     return this.db;
   },
   save() { try { localStorage.setItem(KEY, JSON.stringify(this.db)); } catch (e) { UI.toast('Storage is full — some demo data may not persist.', 'warn'); } },
   reset() { localStorage.removeItem(KEY); this.db = null; this.boot(); },
 
-  /* seeded demo account so the journey can be inspected without signing up */
-  seed() {
-    this.db.seeded = true;
-    if (!this.db.users.some(u => u.email === 'demo@lumea.co')) {
-      const u = { id: 'usr_demo', name: 'Layla Demo', email: 'demo@lumea.co', password: 'demo1234', createdAt: now() - 3 * DAY };
-      this.db.users.push(u);
-      this.db.data[u.id] = blankState(u);
-    }
-    this.save();
-  },
+  /* identities live in Supabase Auth now; nothing to seed locally */
+  seed() { this.db.seeded = true; this.save(); },
 
-  /* --- session --- */
-  session() { return this.db.session; },
-  user() { const s = this.db.session; return s ? this.db.users.find(u => u.id === s.userId) || null : null; },
+  /* --- session: Supabase Auth is the authority; localStorage is a cache --- */
+  /* Supabase Auth is the only authority — a leftover local session must never
+     stand in for one, or clearing cookies would leave a ghost logged in */
+  session() { return Cloud.user ? { userId: Cloud.user.id, remember: true } : null; },
+  user() {
+    if (Cloud.user) {
+      const st = this.db.data[Cloud.user.id];
+      return { id: Cloud.user.id,
+               name: (st && st.profile && st.profile.name) || Cloud.user.email,
+               email: Cloud.user.email,
+               createdAt: Cloud.user.created_at ? new Date(Cloud.user.created_at).getTime() : now() };
+    }
+    return null;
+  },
   state() { const u = this.user(); if (!u) return null; if (!this.db.data[u.id]) this.db.data[u.id] = blankState(u); return this.db.data[u.id]; },
-  commit(mutator) { const st = this.state(); if (!st) return null; mutator(st); this.save(); return st; },
+  commit(mutator) {
+    const st = this.state(); if (!st) return null;
+    mutator(st); this.save(); Cloud.queue();
+    return st;
+  },
 
   findUser(email) { return this.db.users.find(u => u.email.toLowerCase() === String(email).toLowerCase()) || null; },
   createUser({ name, email, password, goals }) {
@@ -136,6 +149,566 @@ function blankState(u) {
 }
 
 const DERM = { name: 'Dr. Nadia Al-Sabah', title: 'Consultant Dermatologist', reg: 'MD · Board Certified · Reg. 41‑2287', years: 14 };
+
+/* ===================== CLOUD (Supabase) =====================
+   Supabase is the durable store. The in-memory state object keeps the same
+   shape the views already expect, so rendering stays synchronous: we hydrate
+   it once after sign-in, then write every change back.
+
+   Reads/writes go through RLS as the signed-in member, so a member can only
+   ever touch their own rows.
+   ============================================================ */
+const CLOUD = {
+  url: 'https://jwfxasnjbyvodtfuymic.supabase.co',
+  key: 'sb_publishable_NAV7BTaOmRJJEK2Celp2GQ_c8ATDJiY',
+  bucket: 'skin-photos'
+};
+
+const Cloud = {
+  sb: null,
+  user: null,          /* the auth user */
+  online: false,
+  pushTimer: null,
+  pushing: false,
+  dirty: false,
+
+  /* ---------- lifecycle ---------- */
+  init() {
+    if (this.sb) return true;
+    if (!window.supabase || !window.supabase.createClient) return false;
+    this.sb = window.supabase.createClient(CLOUD.url, CLOUD.key, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'pkce' }
+    });
+    this.online = true;
+    return true;
+  },
+  async session() {
+    if (!this.init()) return null;
+    const { data } = await this.sb.auth.getSession();
+    return (data && data.session) || null;
+  },
+
+  /* ---------- auth ---------- */
+  async signUp({ name, email, password, goals }) {
+    if (!this.init()) return { error: 'Cloud storage is unavailable — check your connection and reload.' };
+    const { data, error } = await this.sb.auth.signUp({
+      email, password,
+      options: { data: { full_name: name, skin_goals: goals || '' }, emailRedirectTo: location.origin + location.pathname + '#/confirmed' }
+    });
+    if (error) return { error: error.message };
+    if (data.session) { this.user = data.user; return { user: data.user, confirmed: true }; }
+    return { pendingEmail: email };      /* confirmation required */
+  },
+  async signIn(email, password) {
+    if (!this.init()) return { error: 'Cloud storage is unavailable — check your connection and reload.' };
+    const { data, error } = await this.sb.auth.signInWithPassword({ email, password });
+    if (error) {
+      if (/not confirmed/i.test(error.message)) return { unconfirmed: true, email };
+      if (/invalid login/i.test(error.message)) return { error: 'We couldn’t verify those details. Please check your email and password.' };
+      return { error: error.message };
+    }
+    this.user = data.user;
+    return { user: data.user };
+  },
+  async resend(email) {
+    if (!this.init()) return { error: 'Cloud storage is unavailable.' };
+    const { error } = await this.sb.auth.resend({
+      type: 'signup', email,
+      options: { emailRedirectTo: location.origin + location.pathname + '#/confirmed' }
+    });
+    return error ? { error: error.message } : { sent: true };
+  },
+  async signOut() {
+    if (this.sb) await this.sb.auth.signOut();
+    this.user = null;
+  },
+  async resetPassword(email) {
+    if (!this.init()) return { error: 'Cloud storage is unavailable.' };
+    const { error } = await this.sb.auth.resetPasswordForEmail(email, {
+      redirectTo: location.origin + location.pathname + '#/signin'
+    });
+    return error ? { error: error.message } : { sent: true };
+  },
+
+  /* ---------- storage ---------- */
+  async uploadPhoto(dataUrl, kind, dayIndex, label) {
+    if (!this.online || !this.user) return null;
+    try {
+      const blob = await (await fetch(dataUrl)).blob();
+      const path = this.user.id + '/' + uid('img') + '.jpg';
+      const up = await this.sb.storage.from(CLOUD.bucket).upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+      if (up.error) throw up.error;
+      const row = await this.sb.from('skin_photos').insert({
+        user_id: this.user.id, storage_path: path, kind: kind,
+        day_index: dayIndex == null ? null : dayIndex, label: label || null
+      }).select('id').single();
+      if (row.error) throw row.error;
+      return { id: row.data.id, path };
+    } catch (e) { console.warn('photo upload failed', e); return null; }
+  },
+  async photoUrl(path) {
+    if (!this.online || !path) return null;
+    const { data } = await this.sb.storage.from(CLOUD.bucket).createSignedUrl(path, 60 * 60 * 8);
+    return (data && data.signedUrl) || null;
+  },
+
+  /* ---------- hydrate: server -> state ---------- */
+  async hydrate() {
+    if (!this.online || !this.user) return null;
+    const uidv = this.user.id;
+    const sb = this.sb;
+    const st = blankState({ id: uidv, name: '', email: this.user.email });
+    st.cloud = { photoIds: {} };
+
+    const [prof, settings, addr, conc, photos, analysis, cart, orders, trial, sub, thread, prodRevs, clinRev, svcRev, skinRates, acts] = await Promise.all([
+      sb.from('profiles').select('*').eq('id', uidv).maybeSingle(),
+      sb.from('user_settings').select('*').eq('user_id', uidv).maybeSingle(),
+      sb.from('addresses').select('*').eq('user_id', uidv).order('created_at', { ascending: false }).limit(1),
+      sb.from('user_concerns').select('concern_id,priority_rank').eq('user_id', uidv),
+      sb.from('skin_photos').select('*').eq('user_id', uidv).order('taken_at', { ascending: true }),
+      sb.from('analyses').select('*').eq('user_id', uidv).order('created_at', { ascending: false }).limit(1),
+      sb.from('carts').select('id,cart_items(product_id,size,qty,saved_for_later)').eq('user_id', uidv).eq('status', 'open').maybeSingle(),
+      sb.from('orders').select('*,order_items(product_id,size,qty,unit_price)').eq('user_id', uidv).order('placed_at', { ascending: false }),
+      sb.from('trials').select('*,trial_logs(*)').eq('user_id', uidv).order('started_at', { ascending: false }).limit(1),
+      sb.from('subscriptions').select('*').eq('user_id', uidv).neq('status', 'cancelled').maybeSingle(),
+      sb.from('message_threads').select('id,messages(*)').eq('user_id', uidv).maybeSingle(),
+      sb.from('product_reviews').select('*').eq('user_id', uidv),
+      sb.from('clinician_reviews').select('*').eq('user_id', uidv).maybeSingle(),
+      sb.from('service_reviews').select('*').eq('user_id', uidv).maybeSingle(),
+      sb.from('skin_ratings').select('*').eq('user_id', uidv).order('rated_on', { ascending: false }),
+      sb.from('activity_log').select('event,created_at').eq('user_id', uidv).order('created_at', { ascending: true }).limit(40)
+    ]);
+
+    /* profile */
+    if (prof.data) {
+      st.profile.name = prof.data.full_name || this.user.email;
+      st.profile.email = prof.data.email || this.user.email;
+      st.profile.phone = prof.data.phone || '';
+      st.profile.age = prof.data.age || '';
+      st.profile.goals = prof.data.skin_goals || '';
+    }
+    if (settings.data) {
+      st.settings = { dermAlerts: settings.data.derm_alerts, shipReminders: settings.data.ship_reminders,
+                      emailUpdates: settings.data.email_updates, shareAnon: settings.data.share_anonymised };
+    }
+    if (addr.data && addr.data[0]) {
+      const a = addr.data[0];
+      st.profile.address = { name: a.recipient, phone: a.phone, line: a.line, area: a.area, gov: a.governorate };
+      st.cloud.addressId = a.id;
+    }
+
+    /* concerns */
+    (conc.data || []).forEach(c => {
+      st.concerns.push(c.concern_id);
+      if (c.priority_rank) st.priorities[c.priority_rank - 1] = c.concern_id;
+    });
+    st.priorities = st.priorities.filter(Boolean);
+
+    /* photos (signed URLs so <img> works against a private bucket) */
+    const rows = photos.data || [];
+    await Promise.all(rows.map(async p => {
+      const url = await this.photoUrl(p.storage_path);
+      if (!url) return;
+      if (p.kind === 'baseline' && !st.photo) { st.photo = url; st.photoAt = new Date(p.taken_at).getTime(); st.cloud.baselinePath = p.storage_path; }
+      if (p.kind === 'baseline' || p.kind === 'progress') {
+        st.progress.push({ id: p.id, src: url, day: p.day_index || 1, label: p.label || ('Day ' + (p.day_index || 1)), at: new Date(p.taken_at).getTime() });
+      }
+    }));
+    st.progress.sort((a, b) => a.day - b.day);
+
+    /* analysis + review + routine */
+    const an = analysis.data && analysis.data[0];
+    if (an) {
+      st.cloud.analysisId = an.id;
+      const [mets, focus, ancs, rev] = await Promise.all([
+        sb.from('analysis_metrics').select('*').eq('analysis_id', an.id),
+        sb.from('analysis_focus').select('*').eq('analysis_id', an.id).order('rank'),
+        sb.from('analysis_concerns').select('concern_id,priority_rank').eq('analysis_id', an.id),
+        sb.from('reviews').select('*').eq('analysis_id', an.id).maybeSingle()
+      ]);
+      const order = ['hydration', 'oil', 'texture', 'redness', 'pigmentation', 'pores', 'breakouts'];
+      st.report = {
+        createdAt: new Date(an.created_at).getTime(), score: an.score, band: an.band,
+        summary: an.summary, notes: an.patient_notes || '', engine: an.engine_version,
+        concerns: (ancs.data || []).map(c => c.concern_id),
+        metrics: (mets.data || []).slice().sort((a, b) => order.indexOf(a.metric_key) - order.indexOf(b.metric_key)).map(m => ({
+          key: m.metric_key, label: m.label, value: m.value, level: m.level, word: m.display_word,
+          note: m.note, dir: m.metric_key === 'hydration' ? 'good' : 'flag',
+          tone: Engine.tone({ dir: m.metric_key === 'hydration' ? 'good' : 'flag', key: m.metric_key }, m.level)
+        })),
+        focus: (focus.data || []).map(f => ({ key: f.focus_key, t: f.title, d: f.detail })),
+        focusKeys: (focus.data || []).map(f => f.focus_key)
+      };
+      st.notes = an.patient_notes || '';
+
+      if (rev.data) {
+        st.cloud.reviewId = rev.data.id;
+        st.review = {
+          status: rev.data.status === 'info_requested' ? 'info' : rev.data.status,
+          notes: rev.data.clinician_notes || '', requests: [], adjustments: [],
+          confirmedAt: rev.data.confirmed_at ? new Date(rev.data.confirmed_at).getTime() : null,
+          sentAt: new Date(rev.data.sent_at).getTime()
+        };
+        const rt = await sb.from('routines').select('*,routine_items(*)').eq('user_id', uidv)
+                           .order('version', { ascending: false }).limit(1).maybeSingle();
+        if (rt.data) {
+          st.cloud.routineId = rt.data.id;
+          const items = (rt.data.routine_items || []).slice().sort((a, b) => a.step_order - b.step_order);
+          st.routine = {
+            createdAt: new Date(rt.data.created_at).getTime(), version: rt.data.version,
+            approvedBy: rt.data.approved_at ? DERM.name : null,
+            am: items.filter(i => i.slot === 'am').map(i => ({ id: i.product_id, size: i.size })),
+            pm: items.filter(i => i.slot === 'pm').map(i => ({ id: i.product_id, size: i.size })),
+            rationale: st.report.focus.map(f => f.t)
+          };
+        }
+      }
+    }
+
+    /* basket */
+    if (cart.data) {
+      st.cloud.cartId = cart.data.id;
+      (cart.data.cart_items || []).forEach(i => {
+        (i.saved_for_later ? st.saved : st.cart).push({ id: i.product_id, size: i.size, qty: i.qty, at: now() });
+      });
+    }
+
+    /* orders */
+    st.orders = (orders.data || []).map(o => ({
+      id: o.order_number, at: new Date(o.placed_at).getTime(), kind: o.kind,
+      total: Number(o.total), ship: Number(o.shipping), kit: Number(o.bundle_discount),
+      status: o.status.charAt(0).toUpperCase() + o.status.slice(1),
+      eta: o.eta ? new Date(o.eta).getTime() : now(),
+      items: (o.order_items || []).map(i => ({ id: i.product_id, size: i.size, qty: i.qty })),
+      details: { payment: o.payment_method, fee: Number(o.handling_fee) || 0,
+                 address: st.profile.address || null },
+      cloudId: o.id
+    }));
+
+    /* trial */
+    const tr = trial.data && trial.data[0];
+    if (tr) {
+      st.cloud.trialId = tr.id;
+      st.trial = { startedAt: new Date(tr.started_at).getTime(), demoDay: tr.demo_day || 1, logs: {},
+                   orderId: (st.orders.find(o => o.cloudId === tr.order_id) || {}).id || null,
+                   kit: st.routine ? Engine.routineProducts(st.routine).map(p => p.id) : [] };
+      (tr.trial_logs || []).forEach(l => {
+        st.trial.logs[l.day_index] = { at: new Date(l.logged_at).getTime(), note: l.note || '',
+          irritation: l.irritation, dryness: l.dryness, breakouts: l.breakouts,
+          improvement: l.improvement, satisfaction: l.satisfaction };
+      });
+    }
+
+    /* subscription */
+    if (sub.data) {
+      st.cloud.subId = sub.data.id;
+      st.subscription = { status: sub.data.status, startedAt: new Date(sub.data.started_at).getTime(),
+        frequency: sub.data.interval_days, nextShip: sub.data.next_ship_on ? new Date(sub.data.next_ship_on).getTime() : now(),
+        price: Number(sub.data.price), skipNext: sub.data.skip_next, payment: sub.data.payment_method,
+        address: st.profile.address ? st.profile.address.line : 'Not set' };
+    }
+
+    /* messages */
+    if (thread.data) {
+      st.cloud.threadId = thread.data.id;
+      st.messages = (thread.data.messages || []).slice()
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+        .map(m => ({ id: m.id, who: m.sender === 'patient' ? 'me' : m.sender === 'clinician' ? 'derm' : 'system',
+                     text: m.body, at: new Date(m.created_at).getTime() }));
+      st.cloud.msgSynced = st.messages.length;
+    }
+
+    /* ratings and reviews */
+    (prodRevs.data || []).forEach(r => {
+      st.reviews[r.product_id] = { rating: r.rating, text: r.body || '', at: new Date(r.updated_at).getTime() };
+    });
+    if (clinRev.data) st.clinicianReview = { rating: clinRev.data.rating, text: clinRev.data.body || '', at: new Date(clinRev.data.updated_at).getTime() };
+    if (svcRev.data) st.serviceReview = { rating: svcRev.data.rating, text: svcRev.data.body || '', recommend: svcRev.data.would_recommend, at: new Date(svcRev.data.updated_at).getTime() };
+    st.ratings = (skinRates.data || []).map(r => ({ at: new Date(r.created_at).getTime(), rating: r.rating, note: r.note || '' }));
+    st.history = (acts.data || []).map(a => ({ at: new Date(a.created_at).getTime(), t: a.event }));
+
+    return st;
+  }
+};
+
+/* ---------- cloud write layer: state -> server ----------
+   Every Store.commit() queues push(). Each domain is idempotent: ids of
+   already-created rows are kept on state.cloud so a second push updates
+   rather than duplicates. A failure in one domain never blocks the others. */
+Object.assign(Cloud, {
+  queue() {
+    if (!this.online || !this.user) return;
+    this.dirty = true;
+    clearTimeout(this.pushTimer);
+    this.pushTimer = setTimeout(() => this.push(), 700);
+  },
+
+  async push() {
+    if (!this.online || !this.user || this.pushing) return;
+    const st = Store.state();
+    if (!st) return;
+    this.pushing = true; this.dirty = false;
+    const sb = this.sb, me = this.user.id;
+    if (!st.cloud) st.cloud = { photoIds: {} };
+    const c = st.cloud;
+    const fail = [];
+    const step = async (name, fn) => { try { await fn(); } catch (e) { fail.push(name); console.warn('sync ' + name, e); } };
+
+    /* --- profile, settings, address --- */
+    await step('profile', async () => {
+      await sb.from('profiles').update({
+        full_name: st.profile.name || null, phone: st.profile.phone || null,
+        age: st.profile.age ? parseInt(st.profile.age, 10) || null : null,
+        skin_goals: st.profile.goals || null
+      }).eq('id', me);
+    });
+    await step('settings', async () => {
+      await sb.from('user_settings').update({
+        derm_alerts: !!st.settings.dermAlerts, ship_reminders: !!st.settings.shipReminders,
+        email_updates: !!st.settings.emailUpdates, share_anonymised: !!st.settings.shareAnon
+      }).eq('user_id', me);
+    });
+    if (st.profile.address && st.profile.address.line) {
+      await step('address', async () => {
+        const a = st.profile.address;
+        const row = { user_id: me, recipient: a.name || st.profile.name, phone: a.phone || '',
+                      line: a.line, area: a.area || '', governorate: a.gov || '', is_default: true };
+        if (c.addressId) await sb.from('addresses').update(row).eq('id', c.addressId);
+        else { const r = await sb.from('addresses').insert(row).select('id').single(); if (!r.error) c.addressId = r.data.id; }
+      });
+    }
+
+    /* --- concerns --- */
+    await step('concerns', async () => {
+      await sb.from('user_concerns').delete().eq('user_id', me);
+      if (st.concerns.length) {
+        await sb.from('user_concerns').insert(st.concerns.map(id => ({
+          user_id: me, concern_id: id,
+          priority_rank: st.priorities.indexOf(id) > -1 ? st.priorities.indexOf(id) + 1 : null
+        })));
+      }
+    });
+
+    /* --- analysis (insert once, with its children) --- */
+    if (st.report && !c.analysisId) {
+      await step('analysis', async () => {
+        const r = await sb.from('analyses').insert({
+          user_id: me, photo_id: c.baselinePhotoId || null, engine_version: st.report.engine,
+          score: st.report.score, band: st.report.band, summary: st.report.summary,
+          patient_notes: st.notes || null
+        }).select('id').single();
+        if (r.error) throw r.error;
+        c.analysisId = r.data.id;
+        await Promise.all([
+          sb.from('analysis_metrics').insert(st.report.metrics.map(m => ({
+            analysis_id: c.analysisId, metric_key: m.key, label: m.label,
+            value: m.value, level: m.level, display_word: m.word, note: m.note
+          }))),
+          sb.from('analysis_focus').insert(st.report.focus.map((f, i) => ({
+            analysis_id: c.analysisId, rank: i + 1, focus_key: f.key, title: f.t, detail: f.d
+          }))),
+          sb.from('analysis_concerns').insert(st.report.concerns.map(id => ({
+            analysis_id: c.analysisId, concern_id: id,
+            priority_rank: st.priorities.indexOf(id) > -1 ? st.priorities.indexOf(id) + 1 : null
+          })))
+        ]);
+      });
+    }
+
+    /* --- review: the member may submit it; only the server may confirm it --- */
+    if (st.review.status !== 'none' && c.analysisId && !c.reviewId) {
+      await step('review', async () => {
+        const r = await sb.from('reviews').insert({ user_id: me, analysis_id: c.analysisId, status: 'pending' })
+                          .select('id').single();
+        if (r.error) throw r.error;
+        c.reviewId = r.data.id;
+      });
+    }
+
+    /* --- routine: written through release_review(), because RLS reserves
+           routine authorship for the clinician --- */
+    const routineItems = () => {
+      const out = [];
+      st.routine.am.forEach((it, i) => out.push({ product_id: it.id, slot: 'am', step_order: i + 1, size: it.size, rationale: P(it.id).why }));
+      st.routine.pm.forEach((it, i) => out.push({ product_id: it.id, slot: 'pm', step_order: i + 1, size: it.size, rationale: P(it.id).why }));
+      return out;
+    };
+    if (st.routine && st.review.status === 'confirmed' && c.analysisId && !c.routineId) {
+      await step('routine', async () => {
+        const r = await sb.rpc('release_review', {
+          p_analysis: c.analysisId, p_items: routineItems(), p_notes: st.review.notes || null
+        });
+        if (r.error) throw r.error;
+        c.routineId = r.data;
+        c.itemsHash = hash(JSON.stringify(routineItems()));
+      });
+    } else if (st.routine && c.routineId) {
+      const h = hash(JSON.stringify(routineItems()));
+      if (h !== c.itemsHash) {
+        await step('routine_items', async () => {
+          const r = await sb.rpc('set_routine_items', { p_routine: c.routineId, p_items: routineItems() });
+          if (r.error) throw r.error;
+          c.itemsHash = h;
+        });
+      }
+    }
+
+    /* --- basket --- */
+    await step('cart', async () => {
+      if (!c.cartId) {
+        const r = await sb.from('carts').insert({ user_id: me, status: 'open' }).select('id').single();
+        if (r.error) { /* a cart may already exist from another tab */
+          const ex = await sb.from('carts').select('id').eq('user_id', me).eq('status', 'open').maybeSingle();
+          if (ex.data) c.cartId = ex.data.id; else throw r.error;
+        } else c.cartId = r.data.id;
+      }
+      await sb.from('cart_items').delete().eq('cart_id', c.cartId);
+      const rows = st.cart.map(i => ({ cart_id: c.cartId, product_id: i.id, size: i.size, qty: i.qty, saved_for_later: false }))
+        .concat(st.saved.map(i => ({ cart_id: c.cartId, product_id: i.id, size: i.size, qty: i.qty, saved_for_later: true })));
+      if (rows.length) await sb.from('cart_items').insert(rows);
+    });
+
+    /* --- orders (append only) --- */
+    for (const o of st.orders.filter(o => !o.cloudId)) {
+      await step('order', async () => {
+        const sub = o.items.reduce((t, i) => t + (i.size === 'trial' ? P(i.id).trialPrice : P(i.id).price) * i.qty, 0);
+        const r = await sb.from('orders').insert({
+          user_id: me, order_number: o.id, kind: o.kind, subtotal: sub,
+          bundle_discount: o.kit || 0, shipping: o.ship || 0,
+          handling_fee: (o.details && o.details.fee) || 0, total: o.total,
+          status: 'processing', payment_method: (o.details && o.details.payment) || null,
+          address_id: c.addressId || null, eta: new Date(o.eta).toISOString().slice(0, 10)
+        }).select('id').single();
+        if (r.error) throw r.error;
+        o.cloudId = r.data.id;
+        await sb.from('order_items').insert(o.items.map(i => ({
+          order_id: o.cloudId, product_id: i.id, size: i.size, qty: i.qty,
+          unit_price: i.size === 'trial' ? P(i.id).trialPrice : P(i.id).price
+        })));
+      });
+    }
+
+    /* --- trial + logs --- */
+    if (st.trial) {
+      await step('trial', async () => {
+        if (!c.trialId) {
+          const ord = st.orders.find(o => o.id === st.trial.orderId);
+          const r = await sb.from('trials').insert({
+            user_id: me, routine_id: c.routineId || null, order_id: (ord && ord.cloudId) || null,
+            started_at: new Date(st.trial.startedAt).toISOString(), demo_day: Trial.day(st), status: 'active'
+          }).select('id').single();
+          if (r.error) throw r.error;
+          c.trialId = r.data.id;
+        } else {
+          await sb.from('trials').update({ demo_day: Trial.day(st) }).eq('id', c.trialId);
+        }
+        const logs = Object.keys(st.trial.logs).map(d => ({
+          trial_id: c.trialId, day_index: parseInt(d, 10),
+          irritation: st.trial.logs[d].irritation, dryness: st.trial.logs[d].dryness,
+          breakouts: st.trial.logs[d].breakouts, improvement: st.trial.logs[d].improvement,
+          satisfaction: st.trial.logs[d].satisfaction, note: st.trial.logs[d].note || null
+        }));
+        if (logs.length) await sb.from('trial_logs').upsert(logs, { onConflict: 'trial_id,day_index' });
+      });
+    }
+
+    /* --- subscription --- */
+    if (st.subscription) {
+      await step('subscription', async () => {
+        const row = { user_id: me, routine_id: c.routineId || null, status: st.subscription.status,
+          price: st.subscription.price, interval_days: st.subscription.frequency,
+          next_ship_on: new Date(st.subscription.nextShip).toISOString().slice(0, 10),
+          skip_next: !!st.subscription.skipNext, payment_method: st.subscription.payment || null,
+          address_id: c.addressId || null,
+          cancelled_at: st.subscription.status === 'cancelled' ? new Date().toISOString() : null };
+        if (c.subId) await sb.from('subscriptions').update(row).eq('id', c.subId);
+        else { const r = await sb.from('subscriptions').insert(row).select('id').single(); if (!r.error) c.subId = r.data.id; }
+      });
+    }
+
+    /* --- messages (append only) --- */
+    if (st.messages.length > (c.msgSynced || 0)) {
+      await step('messages', async () => {
+        if (!c.threadId) {
+          const clin = await this.clinicianId();
+          const ex = await sb.from('message_threads').select('id').eq('user_id', me).maybeSingle();
+          if (ex.data) c.threadId = ex.data.id;
+          else {
+            const r = await sb.from('message_threads').insert({ user_id: me, clinician_id: clin }).select('id').single();
+            if (r.error) throw r.error;
+            c.threadId = r.data.id;
+          }
+        }
+        const fresh = st.messages.slice(c.msgSynced || 0);
+        await sb.from('messages').insert(fresh.map(m => ({
+          thread_id: c.threadId,
+          sender: m.who === 'me' ? 'patient' : m.who === 'derm' ? 'clinician' : 'system',
+          body: m.text, photo_id: m.photoId || null, created_at: new Date(m.at).toISOString()
+        })));
+        c.msgSynced = st.messages.length;
+      });
+    }
+
+    /* --- reviews and ratings --- */
+    await step('product_reviews', async () => {
+      const ids = Object.keys(st.reviews || {});
+      if (!ids.length) return;
+      await sb.from('product_reviews').upsert(ids.map(id => ({
+        user_id: me, product_id: id, rating: st.reviews[id].rating,
+        body: st.reviews[id].text || null,
+        verified_purchase: st.orders.some(o => o.items.some(i => i.id === id))
+      })), { onConflict: 'user_id,product_id' });
+    });
+    if (st.clinicianReview) {
+      await step('clinician_review', async () => {
+        const clin = await this.clinicianId();
+        await sb.from('clinician_reviews').upsert({ user_id: me, clinician_id: clin,
+          rating: st.clinicianReview.rating, body: st.clinicianReview.text || null },
+          { onConflict: 'user_id,clinician_id' });
+      });
+    }
+    if (st.serviceReview) {
+      await step('service_review', async () => {
+        await sb.from('service_reviews').upsert({ user_id: me, rating: st.serviceReview.rating,
+          body: st.serviceReview.text || null, would_recommend: !!st.serviceReview.recommend },
+          { onConflict: 'user_id' });
+      });
+    }
+    if ((st.ratings || []).length) {
+      await step('skin_ratings', async () => {
+        const r = st.ratings[st.ratings.length - 1];
+        await sb.from('skin_ratings').upsert({ user_id: me, rating: r.rating, note: r.note || null,
+          rated_on: new Date(r.at).toISOString().slice(0, 10) }, { onConflict: 'user_id,rated_on' });
+      });
+    }
+
+    /* --- activity feed (append only) --- */
+    if (st.history.length > (c.actSynced || 0)) {
+      await step('activity', async () => {
+        const fresh = st.history.slice(c.actSynced || 0);
+        await sb.from('activity_log').insert(fresh.map(h => ({
+          user_id: me, event: h.t, created_at: new Date(h.at).toISOString()
+        })));
+        c.actSynced = st.history.length;
+      });
+    }
+
+    Store.save();
+    this.pushing = false;
+    if (fail.length && !this.warned) {
+      this.warned = true;
+      UI.toast('Some changes could not be saved to the cloud (' + fail[0] + '). They are safe in this browser.', 'warn', 5000);
+    }
+    if (this.dirty) this.queue();          /* changes arrived mid-push */
+  },
+
+  async clinicianId() {
+    if (this._clinId) return this._clinId;
+    const r = await this.sb.from('clinicians').select('id').limit(1).maybeSingle();
+    this._clinId = r.data ? r.data.id : null;
+    return this._clinId;
+  }
+});
 
 /* ===================== CATALOG ===================== */
 const CONCERNS = [
@@ -808,18 +1381,32 @@ const Shell = {
 
 /* ===================== AUTH ===================== */
 const Auth = {
-  signUp(data) {
-    if (Store.findUser(data.email)) return { error: 'An account already exists with that email. Try signing in instead.' };
-    const u = Store.createUser(data);
-    Store.commit(st => st.history.push({ at: now(), t: 'Account created' }));
-    return { user: u };
+  async signUp(data) {
+    const res = await Cloud.signUp(data);
+    if (res.error) return res;
+    if (res.pendingEmail) return res;                 /* awaiting email confirmation */
+    Cloud.user = res.user;
+    await Auth.load();
+    Store.commit(st => { st.profile.name = data.name; st.profile.goals = data.goals || ''; st.history.push({ at: now(), t: 'Account created' }); });
+    return { user: res.user };
   },
-  signIn(email, password, remember) {
-    const u = Store.signIn(email, password, remember);
-    return u ? { user: u } : { error: 'We couldn’t verify those details. Please check your email and password.' };
+  async signIn(email, password) {
+    const res = await Cloud.signIn(email, password);
+    if (res.error || res.unconfirmed) return res;
+    Cloud.user = res.user;
+    await Auth.load();
+    return { user: res.user };
+  },
+  /* pull the account down from Supabase into the in-memory state */
+  async load() {
+    const st = await Cloud.hydrate();
+    if (st) { Store.db.data[Cloud.user.id] = st; Store.db.session = { userId: Cloud.user.id, remember: true, at: now() }; Store.save(); }
+    Review.schedule();          /* a review left pending on the server resumes here */
+    return st;
   },
   signOut() {
-    UI.confirm('Log out of Lumea?', 'Your skin profile, routine and messages stay saved to this account.', 'Log out', () => {
+    UI.confirm('Log out of Lumea?', 'Your skin profile, routine and messages stay saved to your account.', 'Log out', async () => {
+      await Cloud.signOut();
       Store.signOut();
       UI.curtain(() => { Router.go('/'); Shell.render(); UI.toast('You’ve been safely signed out.', 'good'); });
     }, true);
@@ -1169,6 +1756,35 @@ const asideArt = (quote) => `
   </div>
 </div>`;
 
+/* Email confirmation is required on this project, so both sign-up and an
+   unconfirmed sign-in land here rather than dead-ending on an error. */
+function pendingConfirm(email, reason) {
+  const card = $('.authcard');
+  if (!card) return;
+  card.innerHTML = `
+    <div class="center viewin">
+      <div class="orderdone__seal">${ico.send}</div>
+      <span class="eyebrow eyebrow--gold">${reason === 'signup' ? 'Almost there' : 'One step left'}</span>
+      <h1 style="font-size:clamp(1.6rem,2.6vw,2.1rem);margin-bottom:12px">Check your email</h1>
+      <p class="small" style="max-width:44ch;margin:0 auto 8px">${reason === 'signup'
+        ? 'We’ve sent a confirmation link to'
+        : 'This account hasn’t been confirmed yet. We can send the link again to'}</p>
+      <p style="font-weight:500;margin-bottom:20px">${esc(email)}</p>
+      <p class="small" style="max-width:46ch;margin:0 auto 24px">Open it and you’ll be signed in automatically. It can take a minute to arrive — check your spam folder if it doesn’t.</p>
+      <div class="btnrow" style="justify-content:center">
+        <button class="btn btn--sm btn--gold" id="resendBtn">Resend the link</button>
+        <a class="btn btn--ghost btn--sm" href="#/signin">Back to sign in</a>
+      </div>
+      <p class="tiny" style="margin-top:18px">Wrong address? <a class="link" href="#/signup">Start again</a></p>
+    </div>`;
+  $('#resendBtn').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    const r = await Cloud.resend(email);
+    UI.toast(r.error ? r.error : 'Link sent again to ' + email, r.error ? 'warn' : 'good', 5000);
+    setTimeout(() => { if (e.target) e.target.disabled = false; }, 30000);
+  });
+}
+
 Views.signin = () => ({
   html: `<div class="authpage">
   ${asideArt('Welcome back.<br>Your skin has been waiting.')}
@@ -1206,26 +1822,43 @@ Views.signin = () => ({
     const form = $('#signinForm');
     const fail = (k, msg) => { const f = $('[data-err="' + k + '"]', form); f.textContent = msg; if (f.closest('.field')) f.closest('.field').classList.add('has-error'); };
     const clear = () => { $$('.field', form).forEach(f => f.classList.remove('has-error')); $$('.err', form).forEach(e => e.textContent = ''); };
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault(); clear();
       const email = $('#si-email').value.trim(), pass = $('#si-pass').value;
       let bad = false;
       if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) { fail('email', 'Enter a valid email address.'); bad = true; }
       if (!pass) { fail('pass', 'Enter your password.'); bad = true; }
       if (bad) return;
-      const res = Auth.signIn(email, pass, $('#si-remember').checked);
+
+      const btn = $('button[type=submit]', form);
+      btn.disabled = true; btn.innerHTML = '<span class="spinner" style="border-top-color:currentColor"></span> Signing in…';
+      const res = await Auth.signIn(email, pass);
+      btn.disabled = false; btn.innerHTML = 'Sign in ' + ico.arrow;
+
+      if (res.unconfirmed) { pendingConfirm(res.email, 'unconfirmed'); return; }
       if (res.error) { fail('form', res.error); return; }
       UI.curtain(() => {
         Shell.render();
         const st = Store.state();
-        Router.go(st.report ? '/dashboard' : '/analyze');
-        UI.toast(greeting() + ', ' + res.user.name.split(' ')[0] + '.', 'good');
+        Router.go(st && st.report ? '/dashboard' : '/analyze');
+        UI.toast(greeting() + ', ' + (Store.user().name || '').split(' ')[0] + '.', 'good');
       });
     });
     $('#forgotBtn').addEventListener('click', () => UI.modal(
-      '<h3>Reset your password</h3><p class="small">Enter your email and we’ll send a reset link. In this prototype no email is sent — your password stays as it is.</p>' +
-      '<div class="field" style="margin-top:18px"><label>Email address</label><input class="input" type="email" placeholder="you@email.com"></div>' +
-      '<button class="btn btn--block" data-close>Send reset link</button>'));
+      '<h3>Reset your password</h3><p class="small">We’ll email you a link to set a new password.</p>' +
+      '<div class="field" style="margin-top:18px"><label for="rsEmail">Email address</label>' +
+      '<input class="input" type="email" id="rsEmail" placeholder="you@email.com" value="' + esc($('#si-email').value.trim()) + '"></div>' +
+      '<button class="btn btn--block" data-reset>Send reset link</button>', {
+      after(m) {
+        $('[data-reset]', m).addEventListener('click', async () => {
+          const mail = $('#rsEmail', m).value.trim();
+          if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(mail)) { UI.toast('Enter a valid email address.', 'warn'); return; }
+          const r = await Cloud.resetPassword(mail);
+          UI.closeModal();
+          UI.toast(r.error ? r.error : 'Reset link sent to ' + mail, r.error ? 'warn' : 'good', 5000);
+        });
+      }
+    }));
     $$('[data-oauth]').forEach(b => b.addEventListener('click', () =>
       UI.toast(b.dataset.oauth + ' sign-in is not wired up in this prototype — use email.', 'warn')));
     /* fill the fields visibly, then submit through the normal flow */
@@ -1302,7 +1935,7 @@ Views.signup = () => ({
     });
     const fail = (k, msg) => { const f = $('[data-err="' + k + '"]', form); f.textContent = msg; f.style.display = 'block'; if (f.closest('.field')) f.closest('.field').classList.add('has-error'); };
     const clear = () => { $$('.field', form).forEach(f => f.classList.remove('has-error')); $$('.err', form).forEach(e => { e.textContent = ''; }); };
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault(); clear();
       const name = $('#su-name').value.trim(), email = $('#su-email').value.trim();
       const p1 = pass.value, p2 = $('#su-pass2').value, goals = $('#su-goals').value.trim();
@@ -1313,8 +1946,14 @@ Views.signup = () => ({
       if (p1 !== p2) { fail('pass2', 'Those passwords don’t match.'); bad = true; }
       if (!$('#su-terms').checked) { fail('terms', 'Please accept the terms to continue.'); bad = true; }
       if (bad) return;
-      const res = Auth.signUp({ name, email, password: p1, goals });
+
+      const btn = $('button[type=submit]', form);
+      btn.disabled = true; btn.innerHTML = '<span class="spinner" style="border-top-color:currentColor"></span> Creating your account…';
+      const res = await Auth.signUp({ name, email, password: p1, goals });
+      btn.disabled = false; btn.innerHTML = 'Create account ' + ico.arrow;
+
       if (res.error) { fail('email', res.error); return; }
+      if (res.pendingEmail) { pendingConfirm(res.pendingEmail, 'signup'); return; }
       UI.curtain(() => {
         Shell.render();
         Router.go('/analyze');
@@ -1524,9 +2163,18 @@ function mountCapture(st) {
         <button class="btn btn--ghost" id="retakeBtn">Choose another</button>
         <button class="btn btn--quiet" id="dropBtn">Remove</button>
       </div>`;
-    $('#useBtn').addEventListener('click', () => {
-      Store.commit(s => { s.photo = shot; s.photoAt = now(); if (!s.progress.some(p => p.day === 1)) s.progress.push({ id: uid('ph'), src: shot, day: 1, label: 'Day 1 — baseline', at: now() }); });
-      UI.toast('Photo saved to your profile', 'good');
+    $('#useBtn').addEventListener('click', async () => {
+      const btn = $('#useBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner" style="border-top-color:currentColor"></span> Saving your photo…';
+      const up = await Cloud.uploadPhoto(shot, 'baseline', 1, 'Day 1 — baseline');
+      const src = up ? (await Cloud.photoUrl(up.path)) || shot : shot;
+      Store.commit(s => {
+        s.photo = src; s.photoAt = now();
+        if (up) { s.cloud = s.cloud || { photoIds: {} }; s.cloud.baselinePhotoId = up.id; s.cloud.baselinePath = up.path; }
+        if (!s.progress.some(p => p.day === 1)) s.progress.push({ id: (up && up.id) || uid('ph'), src, day: 1, label: 'Day 1 — baseline', at: now() });
+      });
+      UI.toast(up ? 'Photo saved to your account' : 'Photo saved in this browser', up ? 'good' : 'warn');
       Router.go('/analyze?step=2');
     });
     $('#retakeBtn').addEventListener('click', drawEmpty);
@@ -2618,10 +3266,10 @@ Views.messages = () => {
           push({ id: uid('m'), who: 'derm', text: Chat.reply(userText), at: now() });
         }, 1500 + Math.random() * 900);
       };
-      const send = (text, img) => {
+      const send = (text, img, photoId) => {
         text = (text || '').trim();
         if (!text && !img) return;
-        push({ id: uid('m'), who: 'me', text: text || 'Photo update', img: img || null, at: now() });
+        push({ id: uid('m'), who: 'me', text: text || 'Photo update', img: img || null, photoId: photoId || null, at: now() });
         input.value = ''; input.style.height = 'auto';
         dermReply(text);
       };
@@ -2632,8 +3280,11 @@ Views.messages = () => {
       $('#attachBtn').addEventListener('click', () => $('#chatFile').click());
       $('#chatFile').addEventListener('change', (e) => {
         const f = e.target.files[0]; if (!f) return;
-        Img.fromFile(f).then(d => send(input.value || 'Here is a photo of the area I mentioned.', d))
-          .catch(err => UI.toast(err.message, 'warn'));
+        Img.fromFile(f).then(async d => {
+          const up = await Cloud.uploadPhoto(d, 'message', null, 'Shared in messages');
+          const src = up ? (await Cloud.photoUrl(up.path)) || d : d;
+          send(input.value || 'Here is a photo of the area I mentioned.', src, up && up.id);
+        }).catch(err => UI.toast(err.message, 'warn'));
       });
       const upd = $('#sendUpdate');
       if (upd) upd.addEventListener('click', () => {
@@ -2876,9 +3527,11 @@ Views.progress = () => {
       if (addEmpty) addEmpty.addEventListener('click', trigger);
       file.addEventListener('change', (e) => {
         const f = e.target.files[0]; if (!f) return;
-        Img.fromFile(f).then(d => {
+        Img.fromFile(f).then(async d => {
           const day = st.trial ? Trial.day(st) : (st.progress.length + 1);
-          Store.commit(s => s.progress.push({ id: uid('ph'), src: d, day, label: 'Day ' + day, at: now() }));
+          const up = await Cloud.uploadPhoto(d, 'progress', day, 'Day ' + day);
+          const src = up ? (await Cloud.photoUrl(up.path)) || d : d;
+          Store.commit(s => s.progress.push({ id: (up && up.id) || uid('ph'), src, day, label: 'Day ' + day, at: now() }));
           UI.toast('Progress photo added · day ' + day, 'good');
           Router.render();
         }).catch(err => UI.toast(err.message, 'warn'));
@@ -3354,7 +4007,9 @@ Views.account = () => {
             <div class="field"><label for="pf-age">Age</label><input class="input" id="pf-age" inputmode="numeric" placeholder="Optional" value="${esc(st.profile.age)}"></div>
           </div>
           <div class="fieldrow">
-            <div class="field"><label for="pf-email">Email</label><input class="input" type="email" id="pf-email" value="${esc(u.email)}"><span class="err" data-err="email"></span></div>
+            <div class="field"><label for="pf-email">Email</label>
+              <input class="input" type="email" id="pf-email" value="${esc(u.email)}" disabled>
+              <div class="hint">Your sign-in address. Changing it needs a fresh confirmation email — ask us and we’ll move it across.</div></div>
             <div class="field"><label for="pf-phone">Mobile</label><input class="input" id="pf-phone" value="${esc(st.profile.phone)}" placeholder="+965 0000 0000"></div>
           </div>
           <div class="field"><label for="pf-goals">Skin goals</label><textarea class="textarea" id="pf-goals" style="min-height:80px">${esc(st.profile.goals)}</textarea></div>
@@ -3479,14 +4134,9 @@ Views.account = () => {
       const pf = $('#profForm');
       if (pf) pf.addEventListener('submit', (e) => {
         e.preventDefault();
-        const email = $('#pf-email').value.trim();
-        if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) { UI.toast('Enter a valid email address.', 'warn'); return; }
-        const other = Store.findUser(email);
-        if (other && other.id !== u.id) { UI.toast('Another account already uses that email.', 'warn'); return; }
-        u.name = $('#pf-name').value.trim() || u.name;
-        u.email = email;
+        const newName = $('#pf-name').value.trim() || u.name;
         Store.commit(s => {
-          s.profile.name = u.name; s.profile.email = email;
+          s.profile.name = newName;
           s.profile.age = $('#pf-age').value.trim();
           s.profile.phone = $('#pf-phone').value.trim();
           s.profile.goals = $('#pf-goals').value.trim();
@@ -3640,11 +4290,32 @@ const Router = {
 
 /* ===================== BOOT ===================== */
 Store.boot();
-Shell.render();
-Review.schedule();
-Router.start();
+(async function boot() {
+  const cameFromEmail = /[?&]code=/.test(location.search) || /access_token=/.test(location.hash);
+  $('#view').innerHTML = '<div class="view--app"><div class="wrap wrap--narrow"><div class="card card--pad-lg">' +
+    '<div class="skel skel--title"></div><div class="skel skel--line"></div>' +
+    '<div class="skel skel--line" style="width:72%"></div><div class="skel skel--line" style="width:54%"></div></div></div></div>';
+
+  let session = null;
+  try { session = await Cloud.session(); } catch (e) { console.warn('session lookup failed', e); }
+  if (session && session.user) {
+    Cloud.user = session.user;
+    try { await Auth.load(); } catch (e) { console.warn('hydrate failed', e); }
+  }
+
+  Shell.render();
+  Review.schedule();
+  Router.start();
+
+  if (cameFromEmail) {
+    history.replaceState(null, '', location.pathname);
+    if (Cloud.user) { Router.go('/dashboard'); UI.toast('Email confirmed — welcome to Lumea.', 'good', 5000); }
+    else { Router.go('/signin'); UI.toast('That link has expired. Please sign in or request a new one.', 'warn', 5000); }
+  }
+  if (!Cloud.online) UI.toast('Offline — changes will stay in this browser only.', 'warn', 5000);
+})();
 
 /* expose a small surface for debugging / future API swap */
-window.LUMEA = { Store, Engine, Cart, Trial, Ratings, Review, Journey, Router, Views, PRODUCTS, UI,
+window.LUMEA = { Store, Engine, Cart, Trial, Ratings, Review, Journey, Router, Views, PRODUCTS, UI, Cloud, Auth,
   reset() { Store.reset(); Shell.render(); Router.go('/'); } };
 })();
